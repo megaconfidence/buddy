@@ -144,13 +144,7 @@ npm run db:migrate:remote
 Store production secrets:
 
 ```bash
-npx wrangler secret put MISTRAL_API_KEY
-npx wrangler secret put RESEND_API_KEY
-npx wrangler secret put EMAIL_TO
-npx wrangler secret put EMAIL_FROM
-npx wrangler secret put FEEDBACK_SECRET
-npx wrangler secret put PUBLIC_BASE_URL
-npx wrangler secret put GITHUB_TOKEN
+npx wrangler secret bulk .env
 ```
 
 Deploy:

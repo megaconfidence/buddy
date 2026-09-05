@@ -14,7 +14,7 @@
     {
       "binding": "DB",
       "database_name": "changelog-buddy-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "2802d6ab-fc9d-444c-a4e6-8c937d0f3d88",
       "migrations_dir": "migrations",
     },
   ],
