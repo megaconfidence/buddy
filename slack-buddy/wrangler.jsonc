@@ -1,0 +1,57 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "buddy",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-05",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "BUDDY_TIMEZONE": "Europe/Paris",
+    "BUDDY_DIGEST_HOUR": "8",
+    "BUDDY_AUTO_JOIN_PUBLIC_CHANNELS": "true",
+    "BUDDY_RETENTION_DAYS": "14",
+    "BUDDY_RECONCILE_HOURS": "48",
+    "MISTRAL_MODEL": "zai-glm-5-2",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "buddy-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BUDDY_AGENT",
+        "class_name": "BuddyAgent",
+      },
+      {
+        "name": "CHAT_STATE",
+        "class_name": "ChatStateDO",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BuddyAgent", "ChatStateDO"],
+    },
+  ],
+  "workflows": [
+    {
+      "name": "buddy-digest",
+      "binding": "DIGEST_WORKFLOW",
+      "class_name": "DigestWorkflow",
+    },
+  ],
+  "triggers": {
+    "crons": ["17 * * * *"],
+  },
+  "observability": {
+    "enabled": true,
+    "traces": {
+      "enabled": true,
+    },
+  },
+}

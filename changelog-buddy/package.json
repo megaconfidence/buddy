@@ -1,0 +1,35 @@
+{
+  "name": "@buddy/changelog-buddy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A daily Mistral changelog and content-opportunity email agent.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "db:migrate:local": "wrangler d1 migrations apply changelog-buddy-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply changelog-buddy-db --remote",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm test",
+    "deploy:dry-run": "wrangler deploy --dry-run"
+  },
+  "dependencies": {
+    "@ai-sdk/mistral": "4.0.39",
+    "ai": "7.0.93",
+    "fast-xml-parser": "5.11.1",
+    "yaml": "2.9.0",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260905.1",
+    "typescript": "7.0.2",
+    "vitest": "5.0.0",
+    "wrangler": "4.129.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "name": "@buddy/slack-buddy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A personalized, continuously learning Slack assistant for developer advocacy.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "db:migrate:local": "wrangler d1 migrations apply buddy-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply buddy-db --remote",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run typecheck && npm test",
+    "deploy:dry-run": "wrangler deploy --dry-run"
+  },
+  "dependencies": {
+    "@ai-sdk/mistral": "4.0.39",
+    "@chat-adapter/slack": "4.39.0",
+    "@cloudflare/think": "0.17.0",
+    "agents": "0.22.0",
+    "ai": "7.0.93",
+    "chat": "4.39.0",
+    "chat-state-cloudflare-do": "0.2.0",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260905.1",
+    "typescript": "7.0.2",
+    "vitest": "5.0.0",
+    "wrangler": "4.129.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

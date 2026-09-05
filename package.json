@@ -1,0 +1,27 @@
+{
+  "name": "buddy-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A monorepo for personalized Buddy assistants.",
+  "workspaces": [
+    "slack-buddy",
+    "changelog-buddy"
+  ],
+  "scripts": {
+    "dev:slack": "npm run dev --workspace @buddy/slack-buddy",
+    "dev:changelog": "npm run dev --workspace @buddy/changelog-buddy",
+    "check": "npm run check --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "deploy:dry-run:slack": "npm run deploy:dry-run --workspace @buddy/slack-buddy",
+    "deploy:dry-run:changelog": "npm run deploy:dry-run --workspace @buddy/changelog-buddy"
+  },
+  "devDependencies": {
+    "prettier": "3.6.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

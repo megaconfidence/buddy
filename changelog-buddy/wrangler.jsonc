@@ -1,0 +1,48 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "changelog-buddy",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-05",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "BUDDY_TIMEZONE": "Europe/Paris",
+    "BUDDY_DIGEST_HOUR": "8",
+    "MISTRAL_MODEL": "zai-glm-5-2",
+    "CHANGE_RETENTION_DAYS": "90",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "changelog-buddy-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "SNAPSHOTS",
+      "bucket_name": "changelog-buddy-snapshots",
+    },
+  ],
+  "workflows": [
+    {
+      "name": "changelog-buddy-source-scan",
+      "binding": "SCAN_WORKFLOW",
+      "class_name": "SourceScanWorkflow",
+    },
+    {
+      "name": "changelog-buddy-digest",
+      "binding": "DIGEST_WORKFLOW",
+      "class_name": "DigestWorkflow",
+    },
+  ],
+  "triggers": {
+    "crons": ["17,47 * * * *"],
+  },
+  "observability": {
+    "enabled": true,
+    "traces": {
+      "enabled": true,
+    },
+  },
+}

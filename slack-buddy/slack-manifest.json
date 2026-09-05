@@ -1,0 +1,58 @@
+{
+  "display_information": {
+    "name": "Buddy",
+    "description": "A private, personalized developer-advocacy assistant",
+    "background_color": "#111827"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Buddy",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "channels:history",
+        "channels:join",
+        "channels:read",
+        "chat:write",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "users:read"
+      ]
+    }
+  },
+  "metadata": {
+    "event_subscriptions": [
+      {
+        "event_type": "buddy.daily_digest",
+        "schema": {
+          "type": "object",
+          "required": ["digest_id"],
+          "properties": {
+            "digest_id": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://YOUR-WORKER.workers.dev/webhooks/slack",
+      "bot_events": ["message.channels", "message.groups", "message.im"]
+    },
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://YOUR-WORKER.workers.dev/webhooks/slack"
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
