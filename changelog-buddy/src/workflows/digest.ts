@@ -6,6 +6,7 @@ import {
 import { NonRetryableError } from "cloudflare:workflows";
 import { createEditorialDigest, PROMPT_VERSION } from "../ai/editorial";
 import { clusterChanges } from "../domain/deduplicate";
+import { shouldSendDigest } from "../domain/delivery";
 import type {
   ChangeEvent,
   DigestWorkflowParams,
@@ -63,6 +64,22 @@ export class DigestWorkflow extends WorkflowEntrypoint<
       const sourceHealth = JSON.parse(serializedHealth) as Awaited<
         ReturnType<ChangelogRepository["sourceHealth"]>
       >;
+      if (!shouldSendDigest(sourceEvents.length, sourceHealth)) {
+        await step.do("skip empty digest", RETRY, async () => {
+          await repository.markDigestSkippedNoUpdates(input.digestId);
+          await repository.deleteExpiredChanges(
+            Date.now() - Number(this.env.CHANGE_RETENTION_DAYS) * 86_400_000,
+          );
+          return "skipped";
+        });
+        return JSON.stringify({
+          digestId: input.digestId,
+          providerMessageId: null,
+          itemCount: 0,
+          emailSent: false,
+          skipReason: "no_updates",
+        });
+      }
       const serializedProfile = await step.do<string>(
         "load editorial preferences",
         RETRY,
@@ -147,6 +164,7 @@ export class DigestWorkflow extends WorkflowEntrypoint<
         digestId: input.digestId,
         providerMessageId,
         itemCount: digest.items.length,
+        emailSent: true,
       });
     } catch (error) {
       await step.do("record digest failure", RETRY, async () => {

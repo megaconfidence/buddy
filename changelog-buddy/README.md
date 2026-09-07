@@ -86,6 +86,11 @@ The email contains:
 Resend receives both responsive HTML and plain text. The deterministic
 `Idempotency-Key` prevents duplicate sends when a Workflow retries.
 
+When a coverage window contains no new change events and every source is
+healthy, the digest is recorded as completed without calling GLM or Resend.
+Source failures still produce an email so a collection outage is not mistaken
+for a quiet day.
+
 The HTML follows Mistral's current brand guidance: the official gradient
 lockup on a white surface with clearspace, warm cream backgrounds, navy type,
 the orange-to-yellow pixel stripe, and Inter/monospace typography with

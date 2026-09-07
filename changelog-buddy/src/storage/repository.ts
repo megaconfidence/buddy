@@ -506,6 +506,28 @@ export class ChangelogRepository {
     }
   }
 
+  async markDigestSkippedNoUpdates(id: string): Promise<void> {
+    const now = Date.now();
+    const digest: EditorialDigest = {
+      overview:
+        "No new public Mistral changes were detected during this coverage window. Email delivery was skipped.",
+      items: [],
+    };
+    await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE digest_runs
+          SET status = 'completed', model = 'not-used', subject = NULL,
+              overview = ?, structured_json = ?, html = NULL, text = NULL,
+              provider_message_id = NULL, completed_at = ?, updated_at = ?,
+              last_error = NULL
+          WHERE id = ?`,
+        )
+        .bind(digest.overview, JSON.stringify(digest), now, now, id),
+      this.db.prepare("DELETE FROM digest_items WHERE digest_id = ?").bind(id),
+    ]);
+  }
+
   async markDigestFailed(id: string, error: string): Promise<void> {
     await this.db
       .prepare(
