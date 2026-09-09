@@ -53,6 +53,8 @@ export type DigestSource = {
 
 export type RankedDigestItem = {
   id: string;
+  /** Application-enforced selection rule; never taken from model output. */
+  mustShow?: boolean;
   relevance: number;
   category:
     | "needs_attention"

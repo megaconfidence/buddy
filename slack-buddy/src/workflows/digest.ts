@@ -96,15 +96,14 @@ export class SlackBuddyDigestWorkflow extends WorkflowEntrypoint<
       );
 
       for (const channel of channels) {
-        await step.do(`reconcile ${channel.id}`, RETRY, () =>
-          reconcileChannelHistory({
-            env: this.env,
-            teamId: input.teamId,
-            channel,
-            startMs: reconcileStartMs,
-            endMs: input.window.endMs,
-          }),
-        );
+        await reconcileChannelHistory({
+          env: this.env,
+          teamId: input.teamId,
+          channel,
+          startMs: reconcileStartMs,
+          endMs: input.window.endMs,
+          checkpoint: (name, work) => step.do(name, RETRY, work),
+        });
       }
 
       const prepared = await step.do(
@@ -118,10 +117,12 @@ export class SlackBuddyDigestWorkflow extends WorkflowEntrypoint<
           );
           const threads = groupMessagesIntoThreads(messages);
           return {
-            inputMessageCount: messages.length,
+            inputMessageCount: messages.filter(
+              (message) => message.postedAt >= input.window.startMs,
+            ).length,
             totalThreadCount: threads.length,
             batches: batchCandidateThreads(
-              scoreCandidateThreads(threads, input.userId),
+              scoreCandidateThreads(threads, input.userId, input.window),
             ),
           };
         },
@@ -178,9 +179,6 @@ export class SlackBuddyDigestWorkflow extends WorkflowEntrypoint<
           channelId: delivery.channelId,
           messageTs: delivery.messageTs,
         });
-        await repository.deleteExpiredData(
-          Date.now() - Number(this.env.SLACK_BUDDY_RETENTION_DAYS) * 86_400_000,
-        );
         return { ok: true };
       });
 

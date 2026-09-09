@@ -36,7 +36,8 @@ Slack Buddy uses three separate state stores:
 - `ChatStateDO` stores Chat SDK locks, deduplication, and subscriptions.
 - `SlackBuddyAgent` stores the user's Think conversation and relevance profile.
 
-Raw Slack messages expire after 14 days by default. Digests, profile versions,
+Raw Slack messages in D1 expire after 14 days by default. Hourly cleanup runs
+before Slack requests, independently of digest delivery. Digests, profile versions,
 and feedback remain available for learning and auditing.
 
 "Learning" means versioned preference memory, not model fine-tuning. Relevant
@@ -52,6 +53,8 @@ relevance thresholds.
 - Channel messages are ingested but Slack Buddy does not reply in public
   channels.
 - Direct mentions are always considered for the daily digest.
+- Required mentions survive synthesis and the usual 15-item limit. Larger
+  briefings are delivered in multiple Slack messages with per-item feedback.
 - Slack Buddy automatically joins every non-archived public channel it is
   permitted to join, and checks for new public channels hourly.
 - Private channels must explicitly invite the Slack Buddy app.
@@ -268,22 +271,40 @@ To exercise the scheduled handler locally, start Wrangler with
 
 - Slack event writes are idempotent by workspace, channel, and message
   timestamp.
+- Ingestion preserves Slack's raw mention identifiers alongside message text.
 - Chat SDK dispatches overlapping messages concurrently; D1 timestamps and
   unique keys make those writes order-independent and idempotent.
 - Edits and deletions update existing D1 rows.
 - Each digest has a deterministic Workflow ID.
 - The D1 run ledger is written before idempotent Workflow `createBatch`
   reconciliation, closing the insert/create crash gap.
-- Workflow steps checkpoint directory sync, reconciliation, each model batch,
+- Workflow steps checkpoint directory sync, each reconciliation page, each model batch,
   synthesis, delivery, and completion.
+- Reconciliation scans available parent-message history, including older
+  parents with recent replies. This requires more Slack API requests for large
+  channels; completed pages resume from checkpoints after a retry. Only text
+  inside the retention period is stored in D1, and page checkpoints contain
+  cursor metadata rather than copies of source messages.
+- Active threads include retained context from before the briefing window;
+  mentions in that earlier context do not trigger another required item.
+- Ranked item IDs are derived from validated sources, so independent model
+  batches cannot collide and exchange source links during synthesis.
 - Before posting, delivery searches recent DM history for Slack Buddy's
   deterministic Block Kit marker and updates an existing digest instead of
-  reposting.
-- The hourly reconciler restarts failed Workflow instances.
+  reposting. Every part of a multi-message digest has its own marker, allowing
+  recovery after only some parts have been delivered.
+- The hourly reconciler checks all unfinished digest runs, including older
+  dates and runs checked before the next delivery time. A failed run or channel
+  discovery request does not prevent other runs from being reconciled.
 - Slack history reconciliation repairs webhook gaps before every digest.
 - Slack Web API requests are intercepted to use Cloudflare's supported
   `cache: "no-store"` mode; Axios `1.20.0` otherwise sends the unsupported
   `cache: "default"` value.
+- Workflow API calls validate Slack's `ok` field, including HTTP-200 errors,
+  and retry explicit rate limits twice while honoring `Retry-After`. Ambiguous
+  failed writes are left to digest delivery recovery instead of blindly reposted.
+- Feedback reads the current profile after external I/O and persists its next
+  version without yielding, preserving overlapping feedback and explicit edits.
 
 ## Security model
 

@@ -89,7 +89,8 @@ REQUIREMENTS
 - Preserve factual grounding and source identifiers exactly.
 - Deduplicate overlapping items.
 - Sort by: needs attention, developer signals, product changes, opportunities, borderline.
-- Keep the strongest 15 items at most.
+- Keep the strongest 15 items at most. Application code will additionally preserve every mustShow item.
+- Preserve each item id exactly; never invent or renumber IDs.
 - Make "whyRelevant" specific to the user's developer-advocacy role.
 - Suggested actions must be concrete and supported by the source.
 - Do not introduce facts that are absent from the ranked items.

@@ -45,7 +45,6 @@ export default {
     env: Env,
     context: ExecutionContext,
   ): Promise<void> {
-    assertConfigured(env);
     context.waitUntil(reconcileDigestSchedule(env, controller.scheduledTime));
   },
 } satisfies ExportedHandler<Env>;

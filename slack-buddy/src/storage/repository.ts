@@ -6,7 +6,7 @@ import type {
 } from "../domain/types";
 import type { MessageWithDisplay } from "../domain/threads";
 
-type DigestRunRow = {
+export type DigestRunRow = {
   id: string;
   team_id: string;
   user_id: string;
@@ -266,10 +266,18 @@ export class SlackBuddyRepository {
           ON c.team_id = m.team_id AND c.channel_id = m.channel_id
         LEFT JOIN slack_users u
           ON u.team_id = m.team_id AND u.user_id = m.user_id
-        WHERE m.team_id = ? AND m.posted_at >= ? AND m.posted_at < ?
+        WHERE m.team_id = ? AND m.posted_at < ? AND m.deleted_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM slack_messages active
+            WHERE active.team_id = m.team_id
+              AND active.channel_id = m.channel_id
+              AND active.thread_ts = m.thread_ts
+              AND active.posted_at >= ? AND active.posted_at < ?
+              AND active.deleted_at IS NULL AND TRIM(active.text) != ''
+          )
         ORDER BY m.posted_at ASC`,
       )
-      .bind(teamId, startMs, endMs)
+      .bind(teamId, endMs, startMs, endMs)
       .all<MessageRow>();
 
     return result.results.map(mapMessageRow);
@@ -357,6 +365,23 @@ export class SlackBuddyRepository {
       .first<DigestRunRow>();
   }
 
+  async listIncompleteDigestRuns(
+    teamId: string,
+    userId: string,
+  ): Promise<DigestRunRow[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT id, team_id, user_id, local_date, timezone, window_start, window_end,
+        workflow_instance_id, status, slack_channel_id, slack_message_ts, error
+       FROM digest_runs
+       WHERE team_id = ? AND user_id = ? AND status != 'completed'
+       ORDER BY local_date ASC`,
+      )
+      .bind(teamId, userId)
+      .all<DigestRunRow>();
+    return result.results;
+  }
+
   async attachWorkflow(id: string, workflowInstanceId: string): Promise<void> {
     await this.db
       .prepare(
@@ -364,7 +389,7 @@ export class SlackBuddyRepository {
         SET workflow_instance_id = ?, status = 'running',
             started_at = COALESCE(started_at, ?),
             error = NULL, updated_at = ?
-        WHERE id = ?`,
+        WHERE id = ? AND status != 'completed'`,
       )
       .bind(workflowInstanceId, Date.now(), Date.now(), id)
       .run();

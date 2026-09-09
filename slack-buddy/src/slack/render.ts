@@ -3,6 +3,7 @@ import type {
   RankedDigestItem,
   StructuredDigest,
 } from "../domain/types";
+import { FEEDBACK_ACTION_IDS } from "./feedback";
 
 const SECTION_LABELS: Record<RankedDigestItem["category"], string> = {
   needs_attention: "Needs your attention",
@@ -57,11 +58,12 @@ export function renderDigestBlocks(
   window: DigestWindow,
   teamId: string,
   digestId: string,
+  markerId = digestId,
 ): unknown[] {
   const blocks: unknown[] = [
     {
       type: "header",
-      block_id: digestMarkerBlockId(digestId),
+      block_id: digestMarkerBlockId(markerId),
       text: {
         type: "plain_text",
         text: `Slack Buddy briefing · ${window.localDate}`,
@@ -138,7 +140,11 @@ export function renderDigestBlocks(
     });
   }
 
-  return blocks.slice(0, 50);
+  if (blocks.length > 50)
+    throw new Error(
+      "Split the digest into pages before rendering Slack blocks",
+    );
+  return blocks;
 }
 
 export function digestMarkerBlockId(digestId: string): string {
@@ -185,7 +191,7 @@ function feedbackButton(
 ): unknown {
   return {
     type: "button",
-    action_id: "slack_buddy_feedback",
+    action_id: FEEDBACK_ACTION_IDS[value],
     text: {
       type: "plain_text",
       text: label,

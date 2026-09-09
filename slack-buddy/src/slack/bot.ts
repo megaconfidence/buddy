@@ -16,6 +16,7 @@ import type { SlackMessage } from "../domain/types";
 import type { Env } from "../env";
 import { SlackBuddyRepository } from "../storage/repository";
 import { CLOUDFLARE_SLACK_WEB_CLIENT_OPTIONS } from "./web-client";
+import { FEEDBACK_ACTION_IDS } from "./feedback";
 
 const ALL_MESSAGES = /[\s\S]*/u;
 
@@ -102,9 +103,15 @@ export function createSlackBuddyChat(env: Env) {
     });
   });
 
-  bot.onAction("slack_buddy_feedback", async (event) => {
-    await handleFeedback(env, event);
-  });
+  // Keep accepting controls on briefings delivered before action IDs were split.
+  for (const actionId of [
+    "slack_buddy_feedback",
+    ...Object.values(FEEDBACK_ACTION_IDS),
+  ]) {
+    bot.onAction(actionId, async (event) => {
+      await handleFeedback(env, event);
+    });
+  }
 
   return bot;
 }
@@ -147,7 +154,7 @@ async function ingestMessage(
   );
 }
 
-function toSlackMessage(
+export function toSlackMessage(
   teamId: string,
   channelId: string,
   eventTs: string,
@@ -164,7 +171,7 @@ function toSlackMessage(
     eventTime: slackTimestampMs(eventTs),
     postedAt: message.metadata.dateSent.getTime(),
     userId: message.author.userId || raw.user || null,
-    text: message.text,
+    text: raw.text ?? message.text,
     subtype: raw.subtype ?? null,
     editedAt: message.metadata.editedAt?.getTime() ?? null,
     deletedAt: null,

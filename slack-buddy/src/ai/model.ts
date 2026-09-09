@@ -66,15 +66,17 @@ export async function rankThreads(
           {
             ...item,
             relevance: 100,
+            mustShow: true,
             category: "needs_attention" as const,
             urgency: "today" as const,
             actionRequired: true,
           },
         ];
       }
-      if (item.relevance >= profile.relevanceThreshold) return [item];
+      if (item.relevance >= profile.relevanceThreshold)
+        return [{ ...item, mustShow: false }];
       if (item.relevance >= profile.borderlineThreshold) {
-        return [{ ...item, category: "borderline" as const }];
+        return [{ ...item, mustShow: false, category: "borderline" as const }];
       }
       return [];
     });
@@ -92,7 +94,7 @@ export async function rankThreads(
     )
     .map(fallbackMustShowItem);
 
-  return [...validItems, ...fallbacks];
+  return canonicalizeItemIds([...validItems, ...fallbacks]);
 }
 
 export async function synthesizeDigest(
@@ -101,6 +103,8 @@ export async function synthesizeDigest(
   rankedItems: RankedDigestItem[],
   totalThreadCount: number,
 ): Promise<StructuredDigest> {
+  // Also normalize cached rankings from older workflow runs.
+  rankedItems = await canonicalizeItemIds(rankedItems);
   if (rankedItems.length === 0) {
     return {
       title: "Slack Buddy briefing",
@@ -125,28 +129,88 @@ export async function synthesizeDigest(
   });
 
   const canonical = new Map(rankedItems.map((item) => [item.id, item]));
+  const seen = new Set<string>();
   const generatedItems = result.output.items
     .filter((item) => canonical.has(item.id))
+    .filter((item) => {
+      if (seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    })
     .map((item) => {
       const source = canonical.get(item.id);
       if (!source) return item;
       return {
         ...item,
+        mustShow: source.mustShow,
         relevance: source.relevance,
         sources: source.sources,
       };
     });
-  const generatedIds = new Set(generatedItems.map((item) => item.id));
-  const missingMustShow = rankedItems.filter(
-    (item) => item.relevance === 100 && !generatedIds.has(item.id),
+  // Required items keep their grounded text and metadata, irrespective of synthesis.
+  const required = rankedItems.filter(isMustShow).map((item) => ({
+    ...item,
+    mustShow: true,
+    relevance: 100,
+    category: "needs_attention" as const,
+    urgency: "today" as const,
+    actionRequired: true,
+  }));
+  const requiredIds = new Set(required.map((item) => item.id));
+  const optional = generatedItems.filter((item) => !requiredIds.has(item.id));
+  const items = [
+    ...required,
+    ...optional.slice(0, Math.max(0, 15 - required.length)),
+  ];
+  const representedThreads = new Set(
+    items.flatMap((item) =>
+      item.sources.map((source) => `${source.channelId}:${source.threadTs}`),
+    ),
   );
-  const items = [...missingMustShow, ...generatedItems].slice(0, 15);
 
   return {
     ...result.output,
     items,
-    omittedThreadCount: Math.max(0, totalThreadCount - items.length),
+    omittedThreadCount: Math.max(0, totalThreadCount - representedThreads.size),
   };
+}
+
+function isMustShow(item: RankedDigestItem): boolean {
+  // Older workflow checkpoints used relevance=100 as the required-item marker.
+  return item.mustShow ?? item.relevance === 100;
+}
+
+async function canonicalizeItemIds(
+  items: RankedDigestItem[],
+): Promise<RankedDigestItem[]> {
+  const canonical = new Map<string, RankedDigestItem>();
+  for (const item of items) {
+    const keys = [
+      ...new Set(
+        item.sources.map(
+          (source) =>
+            `${source.channelId}:${source.threadTs}:${source.messageTs}`,
+        ),
+      ),
+    ].sort();
+    const bytes = new Uint8Array(
+      await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(JSON.stringify(keys)),
+      ),
+    );
+    const id = `item-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    const previous = canonical.get(id);
+    if (
+      !previous ||
+      (isMustShow(item) && !isMustShow(previous)) ||
+      (isMustShow(item) === isMustShow(previous) &&
+        item.relevance > previous.relevance)
+    ) {
+      canonical.set(id, { ...item, id });
+    }
+  }
+  return [...canonical.values()];
 }
 
 function representsMustShow(
@@ -174,6 +238,7 @@ function fallbackMustShowItem({ thread }: CandidateThread): RankedDigestItem {
   return {
     id: `must-show:${thread.channelId}:${thread.threadTs}`,
     relevance: 100,
+    mustShow: true,
     category: "needs_attention",
     urgency: "today",
     headline: "You were mentioned in a Slack thread",

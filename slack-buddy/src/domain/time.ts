@@ -1,5 +1,12 @@
 import type { DigestWindow } from "./types";
 
+export function retentionCutoffMs(days: string, nowMs = Date.now()): number {
+  const value = Number(days);
+  if (!Number.isFinite(value) || value <= 0)
+    throw new Error("Message retention days must be positive");
+  return nowMs - value * 86_400_000;
+}
+
 type DateParts = {
   year: number;
   month: number;

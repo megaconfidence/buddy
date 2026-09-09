@@ -1,16 +1,12 @@
-import {
-  callSlackApi,
-  postSlackMessage,
-  SlackApiError,
-  updateSlackMessage,
-  type SlackApiResponse,
-} from "@chat-adapter/slack/api";
+import { SlackApiError, type SlackApiResponse } from "@chat-adapter/slack/api";
+import { callSlackApi, postSlackMessage, updateSlackMessage } from "./client";
 import type {
   DigestWindow,
   SlackMessage,
   StructuredDigest,
 } from "../domain/types";
 import type { Env } from "../env";
+import { retentionCutoffMs } from "../domain/time";
 import { SlackBuddyRepository } from "../storage/repository";
 import {
   digestMarkerBlockId,
@@ -131,45 +127,79 @@ export async function ensurePublicChannelMembership(
   return accessible;
 }
 
+export type HistoryReconciliationPage = {
+  messageCount: number;
+  latestTs: string | null;
+  nextCursor: string | null;
+};
+
 export async function reconcileChannelHistory(input: {
   env: Env;
   teamId: string;
   channel: SlackChannel;
   startMs: number;
   endMs: number;
+  checkpoint?: (
+    name: string,
+    work: () => Promise<HistoryReconciliationPage>,
+  ) => Promise<HistoryReconciliationPage>;
 }): Promise<{ messageCount: number; latestTs: string | null }> {
-  const messages = await fetchHistoryWindow(
-    input.env.SLACK_BOT_TOKEN,
-    input.channel.id,
-    input.startMs,
-    input.endMs,
-  );
   const repository = new SlackBuddyRepository(input.env.DB);
-  const records = messages
-    .filter((message): message is SlackHistoryMessage & { ts: string } =>
-      Boolean(message.ts),
-    )
-    .map((message) =>
-      historyMessageToRecord(input.teamId, input.channel.id, message),
-    );
-  await repository.ingestMessages(records);
-  const latestTs = records.reduce<string | null>(
-    (latest, message) =>
-      latest === null || message.messageTs.localeCompare(latest) > 0
-        ? message.messageTs
-        : latest,
-    null,
+  const retentionStartMs = retentionCutoffMs(
+    input.env.SLACK_BUDDY_RETENTION_DAYS,
   );
-
-  if (latestTs) {
-    await repository.updateChannelCursor({
-      teamId: input.teamId,
-      channelId: input.channel.id,
-      latestTs,
-    });
-  }
-
-  return { messageCount: messages.length, latestTs };
+  let cursor: string | null = null;
+  let messageCount = 0;
+  let latestTs: string | null = null;
+  let page = 0;
+  do {
+    const pageCursor = cursor;
+    const work = async (): Promise<HistoryReconciliationPage> => {
+      const result = await fetchHistoryPage(
+        input.env.SLACK_BOT_TOKEN,
+        input.channel.id,
+        input.startMs,
+        input.endMs,
+        retentionStartMs,
+        pageCursor,
+      );
+      const records = result.messages.map((message) =>
+        historyMessageToRecord(input.teamId, input.channel.id, message),
+      );
+      await repository.ingestMessages(records);
+      const pageLatestTs = records.reduce<string | null>(
+        (latest, message) =>
+          latest === null || message.messageTs.localeCompare(latest) > 0
+            ? message.messageTs
+            : latest,
+        null,
+      );
+      if (pageLatestTs) {
+        await repository.updateChannelCursor({
+          teamId: input.teamId,
+          channelId: input.channel.id,
+          latestTs: pageLatestTs,
+        });
+      }
+      // Checkpoints contain cursor metadata, never copies of raw Slack history.
+      return {
+        messageCount: records.length,
+        latestTs: pageLatestTs,
+        nextCursor: result.nextCursor,
+      };
+    };
+    const result = input.checkpoint
+      ? await input.checkpoint(
+          `reconcile ${input.channel.id} page ${++page}`,
+          work,
+        )
+      : await work();
+    messageCount += result.messageCount;
+    if (result.latestTs && (latestTs === null || result.latestTs > latestTs))
+      latestTs = result.latestTs;
+    cursor = result.nextCursor;
+  } while (cursor);
+  return { messageCount, latestTs };
 }
 
 export async function deliverDigest(input: {
@@ -181,70 +211,65 @@ export async function deliverDigest(input: {
   existingChannelId: string | null;
   existingMessageTs: string | null;
 }): Promise<{ channelId: string; messageTs: string }> {
-  const markdown = renderDigest(input.digest, input.window, input.teamId);
-  const blocks = renderDigestBlocks(
-    input.digest,
-    input.window,
-    input.teamId,
-    input.digestId,
-  );
-
-  if (input.existingChannelId && input.existingMessageTs) {
-    const updated = await updateSlackMessage({
-      channel: input.existingChannelId,
-      ts: input.existingMessageTs,
-      text: markdown,
-      blocks,
-      token: input.env.SLACK_BOT_TOKEN,
-    });
-    return {
-      channelId: updated.channel ?? input.existingChannelId,
-      messageTs: updated.id || input.existingMessageTs,
-    };
-  }
-
-  const dm = await callSlackApi<
-    SlackApiResponse & { channel?: { id?: string } }
-  >(
-    "conversations.open",
-    { users: input.env.SLACK_USER_ID },
-    { token: input.env.SLACK_BOT_TOKEN },
-  );
-  const channelId = dm.channel?.id;
+  let channelId = input.existingChannelId;
   if (!channelId) {
+    const dm = await callSlackApi<
+      SlackApiResponse & { channel?: { id?: string } }
+    >(
+      "conversations.open",
+      { users: input.env.SLACK_USER_ID },
+      { token: input.env.SLACK_BOT_TOKEN },
+    );
+    channelId = dm.channel?.id ?? null;
+  }
+  if (!channelId)
     throw new Error("Slack conversations.open did not return a DM channel");
-  }
 
-  const recoveredMessageTs = await findDigestMessage(
-    input.env.SLACK_BOT_TOKEN,
-    channelId,
-    input.digestId,
-    input.window.startMs,
-  );
-  if (recoveredMessageTs) {
-    const updated = await updateSlackMessage({
-      channel: channelId,
-      ts: recoveredMessageTs,
-      text: markdown,
-      blocks,
-      token: input.env.SLACK_BOT_TOKEN,
-    });
-    return {
-      channelId: updated.channel ?? channelId,
-      messageTs: updated.id || recoveredMessageTs,
+  const pageCount = Math.max(1, Math.ceil(input.digest.items.length / 15));
+  let firstMessageTs: string | null = null;
+  for (let page = 0; page < pageCount; page += 1) {
+    const markerId =
+      page === 0 ? input.digestId : `${input.digestId}:part:${page + 1}`;
+    const digest: StructuredDigest = {
+      ...input.digest,
+      overview:
+        pageCount > 1
+          ? `Part ${page + 1}/${pageCount}. ${input.digest.overview}`
+          : input.digest.overview,
+      items: input.digest.items.slice(page * 15, (page + 1) * 15),
+      omittedThreadCount:
+        page === pageCount - 1 ? input.digest.omittedThreadCount : 0,
     };
+    const messageTs =
+      (page === 0 ? input.existingMessageTs : null) ??
+      (await findDigestMessage(
+        input.env.SLACK_BOT_TOKEN,
+        channelId,
+        markerId,
+        input.window.startMs,
+      ));
+    const options = {
+      channel: channelId,
+      text: renderDigest(digest, input.window, input.teamId),
+      blocks: renderDigestBlocks(
+        digest,
+        input.window,
+        input.teamId,
+        input.digestId,
+        markerId,
+      ),
+      token: input.env.SLACK_BOT_TOKEN,
+    };
+    const sent = messageTs
+      ? await updateSlackMessage({ ...options, ts: messageTs })
+      : await postSlackMessage(options);
+    if (!sent.id)
+      throw new Error(
+        "Slack digest delivery did not return a message timestamp",
+      );
+    if (page === 0) firstMessageTs = sent.id;
   }
-
-  const posted = await postSlackMessage({
-    channel: channelId,
-    text: markdown,
-    blocks,
-    token: input.env.SLACK_BOT_TOKEN,
-  });
-  return {
-    channelId: posted.channel ?? channelId,
-    messageTs: posted.id,
-  };
+  return { channelId, messageTs: firstMessageTs! };
 }
 
 async function findDigestMessage(
@@ -329,63 +354,63 @@ async function listUsers(token: string): Promise<SlackUser[]> {
   return users;
 }
 
-async function fetchHistoryWindow(
+async function fetchHistoryPage(
   token: string,
   channelId: string,
   startMs: number,
   endMs: number,
-): Promise<SlackHistoryMessage[]> {
+  retentionStartMs: number,
+  cursor: string | null,
+): Promise<{ messages: SlackHistoryMessage[]; nextCursor: string | null }> {
   const byTimestamp = new Map<string, SlackHistoryMessage>();
-  let cursor: string | undefined;
-  const oldest = (startMs / 1_000).toFixed(6);
+  const oldest = (retentionStartMs / 1_000).toFixed(6);
   const latest = (endMs / 1_000).toFixed(6);
+  const result = await callSlackApi<
+    SlackApiResponse & {
+      messages?: SlackHistoryMessage[];
+      response_metadata?: { next_cursor?: string };
+    }
+  >(
+    "conversations.history",
+    {
+      channel: channelId,
+      cursor: cursor ?? undefined,
+      inclusive: true,
+      latest,
+      limit: 200,
+      // Parent timestamps do not change when a thread gets new replies.
+      // Scan older parents too, but retain raw text only inside retention.
+    },
+    { token },
+  );
 
-  do {
-    const result = await callSlackApi<
-      SlackApiResponse & {
-        messages?: SlackHistoryMessage[];
-        response_metadata?: { next_cursor?: string };
-      }
-    >(
-      "conversations.history",
-      {
-        channel: channelId,
-        cursor,
-        inclusive: true,
-        latest,
-        limit: 200,
-        oldest,
-      },
-      { token },
-    );
-
-    for (const message of result.messages ?? []) {
-      if (!message.ts) continue;
+  for (const message of result.messages ?? []) {
+    if (!message.ts) continue;
+    if (slackTimestampMs(message.ts) >= retentionStartMs)
       byTimestamp.set(message.ts, message);
-      if (
-        (message.reply_count ?? 0) > 0 &&
-        message.latest_reply &&
-        slackTimestampMs(message.latest_reply) >= startMs
-      ) {
-        for (const reply of await fetchReplies(
-          token,
-          channelId,
-          message.ts,
-          oldest,
-          latest,
-        )) {
-          if (reply.ts) byTimestamp.set(reply.ts, reply);
-        }
+    if (
+      (message.reply_count ?? 0) > 0 &&
+      message.latest_reply &&
+      slackTimestampMs(message.latest_reply) >= startMs
+    ) {
+      for (const reply of await fetchReplies(
+        token,
+        channelId,
+        message.ts,
+        oldest,
+        latest,
+      )) {
+        if (reply.ts) byTimestamp.set(reply.ts, reply);
       }
     }
-
-    cursor = result.response_metadata?.next_cursor || undefined;
-  } while (cursor);
-
-  return [...byTimestamp.values()].filter((message) => {
-    const timestamp = slackTimestampMs(message.ts ?? "0");
-    return timestamp >= startMs && timestamp < endMs;
-  });
+  }
+  return {
+    messages: [...byTimestamp.values()].filter((message) => {
+      const timestamp = slackTimestampMs(message.ts ?? "0");
+      return timestamp >= retentionStartMs && timestamp < endMs;
+    }),
+    nextCursor: result.response_metadata?.next_cursor || null,
+  };
 }
 
 async function fetchReplies(

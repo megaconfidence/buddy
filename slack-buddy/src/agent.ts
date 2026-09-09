@@ -236,29 +236,33 @@ export class SlackBuddyAgent extends Think<Env> {
     );
     if (!item) return config.profile;
 
+    // External I/O above permits other RPCs and explicit preference updates to
+    // interleave. Read the current profile now; do not await again until the
+    // new version has been synchronously persisted with configure().
+    const current = this.requireConfig();
     const example = `${item.headline}: ${item.whyRelevant}`.slice(0, 300);
     const update =
       input.value === "relevant"
         ? {
             positiveExamples: appendUnique(
-              config.profile.positiveExamples,
+              current.profile.positiveExamples,
               example,
             ),
-            negativeExamples: config.profile.negativeExamples.filter(
+            negativeExamples: current.profile.negativeExamples.filter(
               (existing) => existing !== example,
             ),
           }
         : {
-            positiveExamples: config.profile.positiveExamples.filter(
+            positiveExamples: current.profile.positiveExamples.filter(
               (existing) => existing !== example,
             ),
             negativeExamples: appendUnique(
-              config.profile.negativeExamples,
+              current.profile.negativeExamples,
               example,
             ),
           };
-    const profile = mergeProfile(config.profile, update);
-    const updated = { ...config, profile };
+    const profile = mergeProfile(current.profile, update);
+    const updated = { ...current, profile };
     this.configure(updated);
     await this.saveProfile(updated, `feedback:${input.value}`);
     return profile;

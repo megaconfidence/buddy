@@ -1,4 +1,4 @@
-import type { SlackMessage, SlackThread } from "./types";
+import type { DigestWindow, SlackMessage, SlackThread } from "./types";
 
 export type MessageWithDisplay = SlackMessage & {
   channelName: string | null;
@@ -62,13 +62,20 @@ export function groupMessagesIntoThreads(
 export function scoreCandidateThreads(
   threads: SlackThread[],
   slackUserId: string,
+  window?: Pick<DigestWindow, "startMs" | "endMs">,
 ): CandidateThread[] {
   return threads
     .map((thread) => {
       const combined = thread.messages
         .map((message) => message.text)
         .join("\n");
-      const directMention = combined.includes(`<@${slackUserId}>`);
+      const directMention = thread.messages.some(
+        (message) =>
+          (!window ||
+            (message.postedAt >= window.startMs &&
+              message.postedAt < window.endMs)) &&
+          message.text.includes(`<@${slackUserId}>`),
+      );
       const highSignalMatches = combined.match(HIGH_SIGNAL)?.length ?? 0;
       const multiParticipant =
         new Set(
