@@ -281,6 +281,9 @@ To exercise the scheduled handler locally, start Wrangler with
   reposting.
 - The hourly reconciler restarts failed Workflow instances.
 - Slack history reconciliation repairs webhook gaps before every digest.
+- Slack Web API requests are intercepted to use Cloudflare's supported
+  `cache: "no-store"` mode; Axios `1.20.0` otherwise sends the unsupported
+  `cache: "default"` value.
 
 ## Security model
 

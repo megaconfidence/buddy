@@ -15,6 +15,7 @@ import type { SlackBuddyAgent } from "../agent";
 import type { SlackMessage } from "../domain/types";
 import type { Env } from "../env";
 import { SlackBuddyRepository } from "../storage/repository";
+import { CLOUDFLARE_SLACK_WEB_CLIENT_OPTIONS } from "./web-client";
 
 const ALL_MESSAGES = /[\s\S]*/u;
 
@@ -23,6 +24,7 @@ export function createSlackBuddyChat(env: Env) {
     botToken: env.SLACK_BOT_TOKEN,
     signingSecret: env.SLACK_SIGNING_SECRET,
     nativeStreaming: true,
+    webClientOptions: CLOUDFLARE_SLACK_WEB_CLIENT_OPTIONS,
   });
   const bot = new Chat({
     userName: "slack-buddy",

@@ -1,6 +1,7 @@
 import type { Env } from "./env";
 import { reconcileDigestSchedule } from "./scheduler";
 import { createSlackBuddyChat } from "./slack/bot";
+import { handleSlackUrlVerification } from "./slack/url-verification";
 
 export { SlackBuddyAgent } from "./agent";
 export { SlackBuddyDigestWorkflow } from "./workflows/digest";
@@ -24,6 +25,12 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/webhooks/slack") {
       assertConfigured(env);
+      const verification = await handleSlackUrlVerification(
+        request,
+        env.SLACK_SIGNING_SECRET,
+      );
+      if (verification) return verification;
+
       const bot = createSlackBuddyChat(env);
       return bot.webhooks.slack(request, {
         waitUntil: (task) => context.waitUntil(task),
