@@ -5,6 +5,11 @@
     "background_color": "#111827"
   },
   "features": {
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
     "bot_user": {
       "display_name": "Slack Buddy",
       "always_online": true
