@@ -16,9 +16,11 @@ Cloudflare Worker + Chat SDK Slack adapter
     |-- owner DM --------------------------> Slack Buddy Think agent
     `-- feedback actions ------------------> profile memory
 
-Hourly reconciler
-    |
-    v
+Hourly scheduler (minute 17)
+    |-- discover and join accessible public channels
+    `-- after 08:00 Europe/Paris, start the previous day's digest
+                                  |
+                                  v
 Cloudflare Workflow
     |-- reconcile Slack history
     |-- group messages into threads
@@ -80,10 +82,15 @@ SLACK_USER_ID="U..."
 MISTRAL_API_KEY="..."
 ```
 
+`.env` is for local Wrangler development only. It is gitignored and is not
+uploaded by a push or by Cloudflare Workers Builds. Configure the same values
+as Worker runtime secrets before production use.
+
 The non-secret defaults are in `wrangler.jsonc`:
 
 - Timezone: `Europe/Paris`
-- Delivery hour: `08:00`
+- Digest eligibility: `08:00`; the hourly cron normally starts delivery at
+  approximately `08:17`
 - Auto-join public channels: enabled
 - Raw-message retention: 14 days
 - Slack reconciliation lookback: 48 hours
@@ -125,8 +132,18 @@ Create D1 and replace the placeholder `database_id` in `wrangler.jsonc`:
 ```bash
 cd slack-buddy
 npx wrangler d1 create slack-buddy-db
+```
+
+Copy the returned database ID into `wrangler.jsonc`, replacing
+`00000000-0000-0000-0000-000000000000`, then apply the schema:
+
+```bash
 npm run db:migrate:remote
 ```
+
+Deployments do not apply D1 migrations automatically. Run the remote migration
+command once during initial setup and whenever a future release adds a
+migration.
 
 Store production secrets:
 
@@ -135,19 +152,87 @@ npx wrangler secret put SLACK_BOT_TOKEN
 npx wrangler secret put SLACK_SIGNING_SECRET
 npx wrangler secret put SLACK_USER_ID
 npx wrangler secret put MISTRAL_API_KEY
+npx wrangler secret list
 ```
 
-Deploy:
+These are runtime secrets. If using the dashboard, add them under the
+`slack-buddy` Worker's **Settings > Variables & Secrets**, not only under its
+build settings. The final command should list all four names without exposing
+their values.
+
+## Deploy
+
+For a manual deployment from `slack-buddy/`:
 
 ```bash
 npm run deploy
 ```
 
-Then set both Slack request URLs to:
+For automatic deployment with Cloudflare Workers Builds, create a separate
+build configuration for the `slack-buddy` Worker. Keep the repository root as
+the build root so npm uses the monorepo lockfile, and configure:
 
-```text
-https://<your-worker>.workers.dev/webhooks/slack
-```
+- Production branch: `main`
+- Build command: leave empty
+- Deploy command:
+  `npm run deploy --workspace @buddy/slack-buddy`
+- Runtime secrets: configure them under **Settings > Variables & Secrets**
+
+The Changelog Buddy build is a separate Worker and does not deploy Slack Buddy.
+Optional build watch paths can limit Slack Buddy deployments to changes under
+`slack-buddy/` plus the root `package.json` and `package-lock.json`.
+
+## Activate Slack webhooks
+
+After the first successful deployment:
+
+1. Confirm the health endpoint responds:
+
+   ```bash
+   curl "https://<your-worker>.workers.dev/health"
+   ```
+
+   The response should contain `"name":"Slack Buddy"` and `"status":"ok"`.
+
+2. Replace both `YOUR-WORKER` placeholders in `slack-manifest.json` with the
+   deployed Worker hostname. Both resulting request URLs should be:
+
+   ```text
+   https://<your-worker>.workers.dev/webhooks/slack
+   ```
+
+3. Apply the full JSON manifest to the existing Slack app. Confirm that Slack
+   verifies the Events API and interactivity request URLs.
+4. Reinstall or request approval again only if Slack indicates that the
+   manifest change requires it.
+5. Invite Slack Buddy to every private channel it should monitor. Public
+   channels are discovered and joined on the next hourly run at minute `17`,
+   subject to workspace restrictions.
+
+## Verify production
+
+Run this checklist after the full Slack manifest is active. Run the Wrangler
+commands below from `slack-buddy/`.
+
+1. DM Slack Buddy from the member identified by `SLACK_USER_ID`. It should
+   answer; messages from other members are intentionally ignored.
+2. After Slack Buddy has joined a public channel, post a harmless test message
+   there.
+3. Confirm that the message reached D1:
+
+   ```bash
+   npx wrangler d1 execute slack-buddy-db --remote \
+     --command "SELECT COUNT(*) AS message_count FROM slack_messages"
+   ```
+
+4. Inspect runtime logs if either test fails:
+
+   ```bash
+   npx wrangler tail slack-buddy
+   ```
+
+5. Confirm the next briefing arrives after approximately `08:17`
+   `Europe/Paris`. It summarizes the previous local calendar day.
 
 ## Local development
 
@@ -160,6 +245,24 @@ npm run dev
 
 Slack cannot call localhost directly. Use a secure tunnel for webhook testing,
 or deploy a development Worker and point a separate Slack test app at it.
+
+To exercise the scheduled handler locally, start Wrangler with
+`npm run dev -- --test-scheduled`, then request
+`http://localhost:8787/__scheduled`.
+
+## Troubleshooting
+
+- `invalid_auth`: verify the production `SLACK_BOT_TOKEN`.
+- Slack request-signature failures: verify `SLACK_SIGNING_SECRET`.
+- Missing-table errors: apply the remote D1 migration.
+- DMs receive no answer: verify the full manifest's `message.im` subscription,
+  the request URL, and `SLACK_USER_ID`.
+- Public messages are absent from D1: confirm the app joined the channel and
+  that `message.channels` is subscribed.
+- Private messages are absent from D1: invite the app to the private channel
+  and confirm `message.groups` is subscribed.
+- Workflow or model errors: inspect `npx wrangler tail slack-buddy` and confirm
+  `MISTRAL_API_KEY` and model access.
 
 ## Reliability model
 
