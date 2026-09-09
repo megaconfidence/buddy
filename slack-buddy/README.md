@@ -1,8 +1,8 @@
-# Buddy
+# Slack Buddy
 
-Buddy is a private, personalized Slack assistant for a Developer Advocate at
-Mistral. It passively ingests messages from channels the Slack app can access,
-learns from explicit feedback, answers questions in DM, and sends a
+Slack Buddy is a private, personalized Slack assistant for a Developer Advocate
+at Mistral. It passively ingests messages from channels the Slack app can
+access, learns from explicit feedback, answers questions in DM, and sends a
 source-linked daily briefing.
 
 ## Architecture
@@ -13,7 +13,7 @@ Slack Events API
     v
 Cloudflare Worker + Chat SDK Slack adapter
     |-- channel messages, edits, deletes --> D1
-    |-- owner DM --------------------------> Buddy Think agent
+    |-- owner DM --------------------------> Slack Buddy Think agent
     `-- feedback actions ------------------> profile memory
 
 Hourly reconciler
@@ -28,11 +28,11 @@ Cloudflare Workflow
     `-- post or update the owner's Slack DM
 ```
 
-Buddy uses three separate state stores:
+Slack Buddy uses three separate state stores:
 
 - D1 is the short-lived source of truth for Slack messages and digest runs.
 - `ChatStateDO` stores Chat SDK locks, deduplication, and subscriptions.
-- `BuddyAgent` stores the user's Think conversation and relevance profile.
+- `SlackBuddyAgent` stores the user's Think conversation and relevance profile.
 
 Raw Slack messages expire after 14 days by default. Digests, profile versions,
 and feedback remain available for learning and auditing.
@@ -40,18 +40,19 @@ and feedback remain available for learning and auditing.
 "Learning" means versioned preference memory, not model fine-tuning. Relevant
 and not-relevant feedback adds bounded examples to the user's profile; handled
 items are recorded without changing topic preferences. In DM, you can also ask
-Buddy to remember current priorities, add watched topics, or adjust relevance
-thresholds.
+Slack Buddy to remember current priorities, add watched topics, or adjust
+relevance thresholds.
 
 ## Current scope
 
 - One Slack workspace and one authorized user per deployment.
-- Cross-channel search is only exposed through that user's DM with Buddy.
-- Channel messages are ingested but Buddy does not reply in public channels.
+- Cross-channel search is only exposed through that user's DM with Slack Buddy.
+- Channel messages are ingested but Slack Buddy does not reply in public
+  channels.
 - Direct mentions are always considered for the daily digest.
-- Buddy automatically joins every non-archived public channel it is permitted
-  to join, and checks for new public channels hourly.
-- Private channels must explicitly invite the Buddy app.
+- Slack Buddy automatically joins every non-archived public channel it is
+  permitted to join, and checks for new public channels hourly.
+- Private channels must explicitly invite the Slack Buddy app.
 - Files and message attachments are not ingested in the first version.
 
 ## Prerequisites
@@ -95,10 +96,11 @@ The non-secret defaults are in `wrangler.jsonc`:
 2. Install the app to the workspace.
 3. Copy the Bot User OAuth Token and Signing Secret.
 4. Set `SLACK_USER_ID` to the only Slack member allowed to use the assistant.
-5. After deploying Buddy, replace `YOUR-WORKER` in `slack-manifest.json` with
-   the deployed Worker subdomain and apply that full manifest.
-6. Invite Buddy to every private channel it should monitor. Public channels are
-   joined automatically unless Slack restricts app membership.
+5. After deploying Slack Buddy, replace `YOUR-WORKER` in
+   `slack-manifest.json` with the deployed Worker subdomain and apply that full
+   manifest.
+6. Invite Slack Buddy to every private channel it should monitor. Public
+   channels are joined automatically unless Slack restricts app membership.
 
 The app requests:
 
@@ -111,11 +113,18 @@ The app requests:
 
 Run the Cloudflare commands in this section from `slack-buddy/`.
 
+The Cloudflare resource names are:
+
+- Worker: `slack-buddy`
+- D1 database: `slack-buddy-db`
+- Workflow: `slack-buddy-digest`
+- Durable Object agent class: `SlackBuddyAgent`
+
 Create D1 and replace the placeholder `database_id` in `wrangler.jsonc`:
 
 ```bash
 cd slack-buddy
-npx wrangler d1 create buddy-db
+npx wrangler d1 create slack-buddy-db
 npm run db:migrate:remote
 ```
 
@@ -164,14 +173,16 @@ or deploy a development Worker and point a separate Slack test app at it.
   reconciliation, closing the insert/create crash gap.
 - Workflow steps checkpoint directory sync, reconciliation, each model batch,
   synthesis, delivery, and completion.
-- Before posting, delivery searches recent DM history for Buddy's deterministic
-  Slack message metadata and updates an existing digest instead of reposting.
+- Before posting, delivery searches recent DM history for Slack Buddy's
+  deterministic Slack message metadata and updates an existing digest instead
+  of reposting.
 - The hourly reconciler restarts failed Workflow instances.
 - Slack history reconciliation repairs webhook gaps before every digest.
 
 ## Security model
 
-- Only `SLACK_USER_ID` can interact with Buddy or submit learning feedback.
+- Only `SLACK_USER_ID` can interact with Slack Buddy or submit learning
+  feedback.
 - Cross-channel retrieval is DM-only.
 - Slack text is treated as untrusted data.
 - Digest ranking uses structured output without agent tools.
@@ -180,8 +191,9 @@ or deploy a development Worker and point a separate Slack test app at it.
 - Raw message text is deleted on the configured retention schedule.
 - Secrets live in Wrangler secrets and are never committed.
 
-Before using Buddy with corporate Slack, confirm that storing Slack content in
-Cloudflare D1 and sending selected content to Mistral's API is approved.
+Before using Slack Buddy with corporate Slack, confirm that storing Slack
+content in Cloudflare D1 and sending selected content to Mistral's API is
+approved.
 
 ## Commands
 

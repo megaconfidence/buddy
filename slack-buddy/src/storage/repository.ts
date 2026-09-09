@@ -39,7 +39,7 @@ type MessageRow = {
   is_bot: number | null;
 };
 
-export class BuddyRepository {
+export class SlackBuddyRepository {
   constructor(private readonly db: D1Database) {}
 
   async ingestMessage(message: SlackMessage): Promise<void> {

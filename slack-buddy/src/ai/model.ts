@@ -9,7 +9,7 @@ import type {
 } from "../domain/types";
 import { rankingPrompt, synthesisPrompt } from "./prompts";
 
-export function createBuddyModel(env: {
+export function createSlackBuddyModel(env: {
   MISTRAL_API_KEY: string;
   MISTRAL_MODEL: string;
 }): LanguageModel {
@@ -27,7 +27,7 @@ export async function rankThreads(
     model,
     prompt: rankingPrompt(profile, candidates),
     output: Output.object({
-      name: "buddy_thread_ranking",
+      name: "slack_buddy_thread_ranking",
       description: "Developer-advocacy relevance ranking for Slack threads",
       schema: rankingBatchSchema,
     }),
@@ -103,7 +103,7 @@ export async function synthesizeDigest(
 ): Promise<StructuredDigest> {
   if (rankedItems.length === 0) {
     return {
-      title: "Buddy briefing",
+      title: "Slack Buddy briefing",
       overview:
         "No developer-advocacy items crossed your relevance threshold for this period.",
       items: [],
@@ -115,7 +115,7 @@ export async function synthesizeDigest(
     model,
     prompt: synthesisPrompt(profile, rankedItems, totalThreadCount),
     output: Output.object({
-      name: "buddy_daily_digest",
+      name: "slack_buddy_daily_digest",
       description: "A concise, source-grounded developer-advocacy briefing",
       schema: structuredDigestSchema,
     }),

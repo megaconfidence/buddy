@@ -1,9 +1,9 @@
 import type { Env } from "./env";
 import { reconcileDigestSchedule } from "./scheduler";
-import { createBuddyChat } from "./slack/bot";
+import { createSlackBuddyChat } from "./slack/bot";
 
-export { BuddyAgent } from "./agent";
-export { DigestWorkflow } from "./workflows/digest";
+export { SlackBuddyAgent } from "./agent";
+export { SlackBuddyDigestWorkflow } from "./workflows/digest";
 export { ChatStateDO } from "chat-state-cloudflare-do";
 
 export default {
@@ -16,7 +16,7 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/health") {
       return Response.json({
-        name: "Buddy",
+        name: "Slack Buddy",
         status: "ok",
         model: env.MISTRAL_MODEL,
       });
@@ -24,7 +24,7 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/webhooks/slack") {
       assertConfigured(env);
-      const bot = createBuddyChat(env);
+      const bot = createSlackBuddyChat(env);
       return bot.webhooks.slack(request, {
         waitUntil: (task) => context.waitUntil(task),
       });

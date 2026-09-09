@@ -7,7 +7,7 @@ import {
 import type { DigestWorkflowParams } from "./domain/types";
 import type { Env } from "./env";
 import { ensurePublicChannelMembership, getSlackIdentity } from "./slack/api";
-import { BuddyRepository } from "./storage/repository";
+import { SlackBuddyRepository } from "./storage/repository";
 
 export async function reconcileDigestSchedule(
   env: Env,
@@ -24,8 +24,12 @@ export async function reconcileDigestSchedule(
 }> {
   const { teamId } = await getSlackIdentity(env.SLACK_BOT_TOKEN);
   await ensurePublicChannelMembership(env, teamId);
-  const digestHour = Number(env.BUDDY_DIGEST_HOUR);
-  const targetDate = targetDigestDate(nowMs, env.BUDDY_TIMEZONE, digestHour);
+  const digestHour = Number(env.SLACK_BUDDY_DIGEST_HOUR);
+  const targetDate = targetDigestDate(
+    nowMs,
+    env.SLACK_BUDDY_TIMEZONE,
+    digestHour,
+  );
   if (!targetDate) {
     return {
       teamId,
@@ -34,11 +38,11 @@ export async function reconcileDigestSchedule(
     };
   }
 
-  const window = digestWindowForDate(targetDate, env.BUDDY_TIMEZONE);
+  const window = digestWindowForDate(targetDate, env.SLACK_BUDDY_TIMEZONE);
   const digestId = safeWorkflowId(
-    `buddy-${targetDate}-${teamId}-${env.SLACK_USER_ID}`,
+    `slack-buddy-${targetDate}-${teamId}-${env.SLACK_USER_ID}`,
   );
-  const repository = new BuddyRepository(env.DB);
+  const repository = new SlackBuddyRepository(env.DB);
   await repository.createDigestRun({
     id: digestId,
     teamId,
@@ -97,5 +101,5 @@ export function safeWorkflowId(value: string): string {
   const sanitized = value
     .replace(/[^a-zA-Z0-9-_]/gu, "-")
     .replace(/^[^a-zA-Z0-9_]+/u, "");
-  return (sanitized || `buddy-${crypto.randomUUID()}`).slice(0, 100);
+  return (sanitized || `slack-buddy-${crypto.randomUUID()}`).slice(0, 100);
 }

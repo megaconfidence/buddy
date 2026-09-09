@@ -11,8 +11,10 @@ import type {
   StructuredDigest,
 } from "../domain/types";
 import type { Env } from "../env";
-import { BuddyRepository } from "../storage/repository";
+import { SlackBuddyRepository } from "../storage/repository";
 import { renderDigest, renderDigestBlocks } from "./render";
+
+const SLACK_BUDDY_DIGEST_EVENT_TYPE = "slack_buddy.daily_digest";
 
 export type SlackChannel = {
   id: string;
@@ -67,7 +69,7 @@ export async function syncSlackDirectory(
   env: Env,
   teamId: string,
 ): Promise<SlackChannel[]> {
-  const repository = new BuddyRepository(env.DB);
+  const repository = new SlackBuddyRepository(env.DB);
   const channels = await ensurePublicChannelMembership(env, teamId);
 
   const users = await listUsers(env.SLACK_BOT_TOKEN);
@@ -90,7 +92,7 @@ export async function ensurePublicChannelMembership(
 ): Promise<SlackChannel[]> {
   const channels = await listChannels(env.SLACK_BOT_TOKEN);
   const accessible: SlackChannel[] = [];
-  const autoJoin = env.BUDDY_AUTO_JOIN_PUBLIC_CHANNELS === "true";
+  const autoJoin = env.SLACK_BUDDY_AUTO_JOIN_PUBLIC_CHANNELS === "true";
 
   for (const channel of channels) {
     if (channel.is_archived) continue;
@@ -110,7 +112,7 @@ export async function ensurePublicChannelMembership(
         ) {
           throw error;
         }
-        console.warn("Buddy could not join a public Slack channel", {
+        console.warn("Slack Buddy could not join a public Slack channel", {
           channelId: channel.id,
           error: error instanceof Error ? error.message : String(error),
         });
@@ -120,7 +122,7 @@ export async function ensurePublicChannelMembership(
     if (channel.is_member) accessible.push(channel);
   }
 
-  await new BuddyRepository(env.DB).upsertChannels(
+  await new SlackBuddyRepository(env.DB).upsertChannels(
     accessible.map((channel) => ({
       teamId,
       channelId: channel.id,
@@ -145,7 +147,7 @@ export async function reconcileChannelHistory(input: {
     input.startMs,
     input.endMs,
   );
-  const repository = new BuddyRepository(input.env.DB);
+  const repository = new SlackBuddyRepository(input.env.DB);
   const records = messages
     .filter((message): message is SlackHistoryMessage & { ts: string } =>
       Boolean(message.ts),
@@ -241,7 +243,7 @@ export async function deliverDigest(input: {
     text: markdown,
     blocks,
     metadata: {
-      event_type: "buddy.daily_digest",
+      event_type: SLACK_BUDDY_DIGEST_EVENT_TYPE,
       event_payload: { digest_id: input.digestId },
     },
     token: input.env.SLACK_BOT_TOKEN,
@@ -279,7 +281,7 @@ async function findDigestMessage(
     );
     const existing = (result.messages ?? []).find(
       (message) =>
-        message.metadata?.event_type === "buddy.daily_digest" &&
+        message.metadata?.event_type === SLACK_BUDDY_DIGEST_EVENT_TYPE &&
         message.metadata.event_payload?.digest_id === digestId &&
         message.ts,
     );

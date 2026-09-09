@@ -1,12 +1,12 @@
 {
   "display_information": {
-    "name": "Buddy",
+    "name": "Slack Buddy",
     "description": "A private, personalized developer-advocacy assistant",
     "background_color": "#111827"
   },
   "features": {
     "bot_user": {
-      "display_name": "Buddy",
+      "display_name": "Slack Buddy",
       "always_online": true
     }
   },

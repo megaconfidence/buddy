@@ -3,7 +3,7 @@ import type { StructuredDigest } from "../src/domain/types";
 import { renderDigest, renderDigestBlocks } from "../src/slack/render";
 
 const digest: StructuredDigest = {
-  title: "Buddy briefing",
+  title: "Slack Buddy briefing",
   overview: "One item needs your attention.",
   omittedThreadCount: 2,
   items: [
@@ -39,7 +39,7 @@ const window = {
 describe("Slack digest rendering", () => {
   it("renders a source-linked text fallback", () => {
     const rendered = renderDigest(digest, window, "T123");
-    expect(rendered).toContain("Buddy briefing · 2026-09-04");
+    expect(rendered).toContain("Slack Buddy briefing · 2026-09-04");
     expect(rendered).toContain("slack://channel?");
     expect(rendered).toContain("Suggested action");
   });
@@ -49,7 +49,7 @@ describe("Slack digest rendering", () => {
       digest,
       window,
       "T123",
-      "buddy-2026-09-04-T123-U123",
+      "slack-buddy-2026-09-04-T123-U123",
     ) as Array<Record<string, unknown>>;
     expect(blocks.length).toBeLessThanOrEqual(50);
     expect(blocks.some((block) => block.type === "actions")).toBe(true);

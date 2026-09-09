@@ -4,8 +4,12 @@ import {
   type WorkflowStep,
 } from "cloudflare:workers";
 import { getAgentByName } from "agents";
-import type { BuddyAgent } from "../agent";
-import { createBuddyModel, rankThreads, synthesizeDigest } from "../ai/model";
+import type { SlackBuddyAgent } from "../agent";
+import {
+  createSlackBuddyModel,
+  rankThreads,
+  synthesizeDigest,
+} from "../ai/model";
 import { PROMPT_VERSION } from "../ai/prompts";
 import {
   batchCandidateThreads,
@@ -23,9 +27,9 @@ import {
   reconcileChannelHistory,
   syncSlackDirectory,
 } from "../slack/api";
-import { agentName } from "../slack/bot";
+import { slackBuddyAgentName } from "../slack/bot";
 import { renderDigest } from "../slack/render";
-import { BuddyRepository } from "../storage/repository";
+import { SlackBuddyRepository } from "../storage/repository";
 
 const RETRY = {
   retries: {
@@ -36,7 +40,7 @@ const RETRY = {
   timeout: "10 minutes" as const,
 };
 
-export class DigestWorkflow extends WorkflowEntrypoint<
+export class SlackBuddyDigestWorkflow extends WorkflowEntrypoint<
   Env,
   DigestWorkflowParams
 > {
@@ -45,7 +49,7 @@ export class DigestWorkflow extends WorkflowEntrypoint<
     step: WorkflowStep,
   ): Promise<{ digestId: string; selectedItems: number }> {
     const input = event.payload;
-    const repository = new BuddyRepository(this.env.DB);
+    const repository = new SlackBuddyRepository(this.env.DB);
 
     try {
       await step.do("mark digest running", RETRY, async () => {
@@ -57,9 +61,9 @@ export class DigestWorkflow extends WorkflowEntrypoint<
         "load relevance profile",
         RETRY,
         async () => {
-          const agent = await getAgentByName<Env, BuddyAgent>(
-            this.env.BUDDY_AGENT,
-            agentName(input.teamId, input.userId),
+          const agent = await getAgentByName<Env, SlackBuddyAgent>(
+            this.env.SLACK_BUDDY_AGENT,
+            slackBuddyAgentName(input.teamId, input.userId),
           );
           await agent.configureForUser({
             teamId: input.teamId,
@@ -87,7 +91,8 @@ export class DigestWorkflow extends WorkflowEntrypoint<
       );
       const reconcileStartMs = Math.min(
         input.window.startMs,
-        input.window.endMs - Number(this.env.BUDDY_RECONCILE_HOURS) * 3_600_000,
+        input.window.endMs -
+          Number(this.env.SLACK_BUDDY_RECONCILE_HOURS) * 3_600_000,
       );
 
       for (const channel of channels) {
@@ -125,14 +130,14 @@ export class DigestWorkflow extends WorkflowEntrypoint<
       const rankedItems: RankedDigestItem[] = [];
       for (const [index, batch] of prepared.batches.entries()) {
         const items = await step.do(`rank batch ${index + 1}`, RETRY, () =>
-          rankThreads(createBuddyModel(this.env), profile, batch),
+          rankThreads(createSlackBuddyModel(this.env), profile, batch),
         );
         rankedItems.push(...items);
       }
 
       const digest = await step.do("synthesize digest", RETRY, () =>
         synthesizeDigest(
-          createBuddyModel(this.env),
+          createSlackBuddyModel(this.env),
           profile,
           rankedItems,
           prepared.totalThreadCount,
@@ -174,7 +179,7 @@ export class DigestWorkflow extends WorkflowEntrypoint<
           messageTs: delivery.messageTs,
         });
         await repository.deleteExpiredData(
-          Date.now() - Number(this.env.BUDDY_RETENTION_DAYS) * 86_400_000,
+          Date.now() - Number(this.env.SLACK_BUDDY_RETENTION_DAYS) * 86_400_000,
         );
         return { ok: true };
       });

@@ -8,7 +8,7 @@ import type { CandidateThread } from "../domain/threads";
 export const PROMPT_VERSION = "2026-09-05.1";
 
 export function interactiveSystemPrompt(profile: RelevanceProfile): string {
-  return `You are Buddy, a private developer-advocacy assistant.
+  return `You are Slack Buddy, a private developer-advocacy assistant.
 
 Your user is a ${profile.role}.
 Mission: ${profile.mission}
@@ -80,7 +80,7 @@ export function synthesisPrompt(
   rankedItems: RankedDigestItem[],
   totalThreadCount: number,
 ): string {
-  return `Create Buddy's concise daily briefing for this user.
+  return `Create Slack Buddy's concise daily briefing for this user.
 
 USER PROFILE
 ${JSON.stringify(profile)}

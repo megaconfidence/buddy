@@ -11,21 +11,21 @@ import {
   createCloudflareState,
   type ChatStateDO,
 } from "chat-state-cloudflare-do";
-import type { BuddyAgent } from "../agent";
+import type { SlackBuddyAgent } from "../agent";
 import type { SlackMessage } from "../domain/types";
 import type { Env } from "../env";
-import { BuddyRepository } from "../storage/repository";
+import { SlackBuddyRepository } from "../storage/repository";
 
 const ALL_MESSAGES = /[\s\S]*/u;
 
-export function createBuddyChat(env: Env) {
+export function createSlackBuddyChat(env: Env) {
   const slack = createSlackAdapter({
     botToken: env.SLACK_BOT_TOKEN,
     signingSecret: env.SLACK_SIGNING_SECRET,
     nativeStreaming: true,
   });
   const bot = new Chat({
-    userName: "buddy",
+    userName: "slack-buddy",
     adapters: { slack },
     state: createCloudflareState({
       namespace: env.CHAT_STATE as DurableObjectNamespace<ChatStateDO>,
@@ -60,7 +60,7 @@ export function createBuddyChat(env: Env) {
     const teamId = raw.team_id ?? raw.team;
     if (!teamId) throw new Error("Slack delete event is missing team_id");
 
-    await new BuddyRepository(env.DB).deleteMessage({
+    await new SlackBuddyRepository(env.DB).deleteMessage({
       eventId: eventKey(
         teamId,
         event.channelId,
@@ -81,9 +81,9 @@ export function createBuddyChat(env: Env) {
     const teamId = raw.team_id ?? raw.team;
     if (!teamId) throw new Error("Slack DM event is missing team_id");
 
-    const agent = await getAgentByName<Env, BuddyAgent>(
-      env.BUDDY_AGENT,
-      agentName(teamId, env.SLACK_USER_ID),
+    const agent = await getAgentByName<Env, SlackBuddyAgent>(
+      env.SLACK_BUDDY_AGENT,
+      slackBuddyAgentName(teamId, env.SLACK_USER_ID),
     );
     await agent.configureForUser({
       teamId,
@@ -100,14 +100,14 @@ export function createBuddyChat(env: Env) {
     });
   });
 
-  bot.onAction("buddy_feedback", async (event) => {
+  bot.onAction("slack_buddy_feedback", async (event) => {
     await handleFeedback(env, event);
   });
 
   return bot;
 }
 
-export function agentName(teamId: string, userId: string): string {
+export function slackBuddyAgentName(teamId: string, userId: string): string {
   return `${teamId}:${userId}`;
 }
 
@@ -127,7 +127,7 @@ async function ingestMessage(
   }
 
   const eventTs = raw.event_ts ?? raw.edited?.ts ?? messageTs;
-  const repository = new BuddyRepository(env.DB);
+  const repository = new SlackBuddyRepository(env.DB);
   await repository.upsertUser({
     teamId,
     userId: message.author.userId,
@@ -182,9 +182,9 @@ async function handleFeedback(env: Env, event: ActionEvent): Promise<void> {
   const teamId = raw.team?.id ?? raw.team_id;
   if (!teamId) throw new Error("Slack feedback event is missing team_id");
 
-  const agent = await getAgentByName<Env, BuddyAgent>(
-    env.BUDDY_AGENT,
-    agentName(teamId, env.SLACK_USER_ID),
+  const agent = await getAgentByName<Env, SlackBuddyAgent>(
+    env.SLACK_BUDDY_AGENT,
+    slackBuddyAgentName(teamId, env.SLACK_USER_ID),
   );
   await agent.configureForUser({ teamId, userId: env.SLACK_USER_ID });
   await agent.applyFeedback({
@@ -201,7 +201,7 @@ async function handleFeedback(env: Env, event: ActionEvent): Promise<void> {
       event.user,
       value.value === "handled"
         ? "Marked as handled."
-        : "Thanks — Buddy will use that feedback in future briefings.",
+        : "Thanks — Slack Buddy will use that feedback in future briefings.",
       { fallbackToDM: true },
     );
   }

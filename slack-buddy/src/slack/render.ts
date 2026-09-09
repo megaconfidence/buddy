@@ -37,7 +37,7 @@ export function renderDigest(
   });
 
   const lines = [
-    `# Buddy briefing · ${window.localDate}`,
+    `# Slack Buddy briefing · ${window.localDate}`,
     digest.overview,
     "",
     ...sections.flatMap((section) => [section, ""]),
@@ -45,7 +45,7 @@ export function renderDigest(
 
   if (digest.omittedThreadCount > 0) {
     lines.push(
-      `_Buddy reviewed additional context and omitted ${digest.omittedThreadCount} low-relevance threads._`,
+      `_Slack Buddy reviewed additional context and omitted ${digest.omittedThreadCount} low-relevance threads._`,
     );
   }
 
@@ -63,7 +63,7 @@ export function renderDigestBlocks(
       type: "header",
       text: {
         type: "plain_text",
-        text: `Buddy briefing · ${window.localDate}`,
+        text: `Slack Buddy briefing · ${window.localDate}`,
       },
     },
     {
@@ -114,7 +114,7 @@ export function renderDigestBlocks(
         },
         {
           type: "actions",
-          block_id: `buddy:${item.id}`.slice(0, 255),
+          block_id: `slack-buddy:${item.id}`.slice(0, 255),
           elements: [
             feedbackButton("Relevant", "relevant", digestId, item.id),
             feedbackButton("Not relevant", "not_relevant", digestId, item.id),
@@ -131,7 +131,7 @@ export function renderDigestBlocks(
       elements: [
         {
           type: "mrkdwn",
-          text: `Buddy omitted ${digest.omittedThreadCount} low-relevance threads.`,
+          text: `Slack Buddy omitted ${digest.omittedThreadCount} low-relevance threads.`,
         },
       ],
     });
@@ -180,7 +180,7 @@ function feedbackButton(
 ): unknown {
   return {
     type: "button",
-    action_id: "buddy_feedback",
+    action_id: "slack_buddy_feedback",
     text: {
       type: "plain_text",
       text: label,

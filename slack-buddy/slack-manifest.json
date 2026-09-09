@@ -1,12 +1,12 @@
 {
   "display_information": {
-    "name": "Buddy",
+    "name": "Slack Buddy",
     "description": "A private, personalized developer-advocacy assistant",
     "background_color": "#111827"
   },
   "features": {
     "bot_user": {
-      "display_name": "Buddy",
+      "display_name": "Slack Buddy",
       "always_online": true
     }
   },
@@ -29,7 +29,7 @@
   "metadata": {
     "event_subscriptions": [
       {
-        "event_type": "buddy.daily_digest",
+        "event_type": "slack_buddy.daily_digest",
         "schema": {
           "type": "object",
           "required": ["digest_id"],
@@ -44,12 +44,12 @@
   },
   "settings": {
     "event_subscriptions": {
-      "request_url": "https://YOUR-WORKER.workers.dev/webhooks/slack",
+      "request_url": "https://slack-buddy.workers.dev/webhooks/slack",
       "bot_events": ["message.channels", "message.groups", "message.im"]
     },
     "interactivity": {
       "is_enabled": true,
-      "request_url": "https://YOUR-WORKER.workers.dev/webhooks/slack"
+      "request_url": "https://slack-buddy.workers.dev/webhooks/slack"
     },
     "org_deploy_enabled": false,
     "socket_mode_enabled": false,
