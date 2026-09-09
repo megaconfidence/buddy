@@ -26,22 +26,6 @@
       ]
     }
   },
-  "metadata": {
-    "event_subscriptions": [
-      {
-        "event_type": "slack_buddy.daily_digest",
-        "schema": {
-          "type": "object",
-          "required": ["digest_id"],
-          "properties": {
-            "digest_id": {
-              "type": "string"
-            }
-          }
-        }
-      }
-    ]
-  },
   "settings": {
     "event_subscriptions": {
       "request_url": "https://slack-buddy.conflare.workers.dev/webhooks/slack",

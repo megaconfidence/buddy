@@ -12,9 +12,11 @@ import type {
 } from "../domain/types";
 import type { Env } from "../env";
 import { SlackBuddyRepository } from "../storage/repository";
-import { renderDigest, renderDigestBlocks } from "./render";
-
-const SLACK_BUDDY_DIGEST_EVENT_TYPE = "slack_buddy.daily_digest";
+import {
+  digestMarkerBlockId,
+  renderDigest,
+  renderDigestBlocks,
+} from "./render";
 
 export type SlackChannel = {
   id: string;
@@ -36,16 +38,11 @@ type SlackUser = {
 };
 
 type SlackHistoryMessage = {
+  blocks?: Array<{ block_id?: string }>;
   bot_id?: string;
   edited?: { ts?: string };
   reply_count?: number;
   latest_reply?: string;
-  metadata?: {
-    event_type?: string;
-    event_payload?: {
-      digest_id?: string;
-    };
-  };
   subtype?: string;
   text?: string;
   thread_ts?: string;
@@ -242,10 +239,6 @@ export async function deliverDigest(input: {
     channel: channelId,
     text: markdown,
     blocks,
-    metadata: {
-      event_type: SLACK_BUDDY_DIGEST_EVENT_TYPE,
-      event_payload: { digest_id: input.digestId },
-    },
     token: input.env.SLACK_BOT_TOKEN,
   });
   return {
@@ -273,7 +266,6 @@ async function findDigestMessage(
       {
         channel: channelId,
         cursor,
-        include_all_metadata: true,
         limit: 100,
         oldest: (oldestMs / 1_000).toFixed(6),
       },
@@ -281,9 +273,9 @@ async function findDigestMessage(
     );
     const existing = (result.messages ?? []).find(
       (message) =>
-        message.metadata?.event_type === SLACK_BUDDY_DIGEST_EVENT_TYPE &&
-        message.metadata.event_payload?.digest_id === digestId &&
-        message.ts,
+        message.blocks?.some(
+          (block) => block.block_id === digestMarkerBlockId(digestId),
+        ) && message.ts,
     );
     if (existing?.ts) return existing.ts;
     cursor = result.response_metadata?.next_cursor || undefined;

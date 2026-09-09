@@ -111,7 +111,7 @@ The non-secret defaults are in `wrangler.jsonc`:
 
 The app requests:
 
-- Message history and metadata for joined public/private channels
+- Message history plus channel and user directory data
 - DM access for the interactive assistant
 - `chat:write` for answers and daily briefings
 - `users:read` for attribution
@@ -277,8 +277,8 @@ To exercise the scheduled handler locally, start Wrangler with
 - Workflow steps checkpoint directory sync, reconciliation, each model batch,
   synthesis, delivery, and completion.
 - Before posting, delivery searches recent DM history for Slack Buddy's
-  deterministic Slack message metadata and updates an existing digest instead
-  of reposting.
+  deterministic Block Kit marker and updates an existing digest instead of
+  reposting.
 - The hourly reconciler restarts failed Workflow instances.
 - Slack history reconciliation repairs webhook gaps before every digest.
 

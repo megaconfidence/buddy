@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { StructuredDigest } from "../src/domain/types";
-import { renderDigest, renderDigestBlocks } from "../src/slack/render";
+import {
+  digestMarkerBlockId,
+  renderDigest,
+  renderDigestBlocks,
+} from "../src/slack/render";
 
 const digest: StructuredDigest = {
   title: "Slack Buddy briefing",
@@ -52,6 +56,9 @@ describe("Slack digest rendering", () => {
       "slack-buddy-2026-09-04-T123-U123",
     ) as Array<Record<string, unknown>>;
     expect(blocks.length).toBeLessThanOrEqual(50);
+    expect(blocks[0]?.block_id).toBe(
+      digestMarkerBlockId("slack-buddy-2026-09-04-T123-U123"),
+    );
     expect(blocks.some((block) => block.type === "actions")).toBe(true);
   });
 });

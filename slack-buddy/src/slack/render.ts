@@ -61,6 +61,7 @@ export function renderDigestBlocks(
   const blocks: unknown[] = [
     {
       type: "header",
+      block_id: digestMarkerBlockId(digestId),
       text: {
         type: "plain_text",
         text: `Slack Buddy briefing · ${window.localDate}`,
@@ -138,6 +139,10 @@ export function renderDigestBlocks(
   }
 
   return blocks.slice(0, 50);
+}
+
+export function digestMarkerBlockId(digestId: string): string {
+  return `slack-buddy-digest:${digestId}`.slice(0, 255);
 }
 
 function renderItem(item: RankedDigestItem, teamId: string): string {
