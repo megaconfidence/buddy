@@ -160,8 +160,8 @@ export async function renderDigestEmail(input: {
       <div style="background:${COLOR.navy};color:${COLOR.cream};padding:22px 24px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.7">
         <strong style="color:${COLOR.yellow}">SOURCE HEALTH</strong><br>
         ${escapeHtml(coverage)}<br>
-        Coverage ${escapeHtml(formatCoverage(input.window))}
         ${failingSources.length > 0 ? `<br>Unavailable: ${escapeHtml(failingSources.map((source) => source.name).join(", "))}` : ""}
+        Coverage ${escapeHtml(formatCoverage(input.window))}
       </div>
       ${pixelStripe()}
     </main>
