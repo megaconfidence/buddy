@@ -12,7 +12,7 @@
     {
       "binding": "DB",
       "database_name": "slack-buddy-db",
-      "database_id": "94332229-9de9-4e16-b8c2-7669b9f2118e",
+      "database_id": "2ed53116-12cc-4ff9-a245-62ec7b3ff152",
       "migrations_dir": "migrations",
     },
   ],
