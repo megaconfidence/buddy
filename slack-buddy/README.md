@@ -1,441 +1,116 @@
 # Slack Buddy
 
-Slack Buddy is a private, personalized Slack assistant for a Developer Advocate
-at Mistral. It passively ingests messages from channels the Slack app can
-access, learns from explicit feedback, answers questions in DM, and sends a
-source-linked daily briefing.
+A private DevRel briefing and research app using the approved Mistral Slack MCP connector.
 
-## Architecture
+## What it does
+
+- **Your briefing:** source-linked developments, upcoming plans, content opportunities, and direct mentions.
+- **Ask & explore:** questions and follow-ups over recent Slack activity, with session context held only in browser memory.
+- **Priorities:** editable OCR and Vibe defaults, additional search keywords, broader DevRel topics, preferred content formats, and separate relevance/content feedback.
+- **Slack delivery:** review a briefing in the browser, then send it to your configured Slack account.
+- **Activity:** recent run counts, coverage, errors, and delivery status without a stored archive of Slack content.
+
+Joined public and private channels are in scope by default. The connector checks current memberships at search time, so future joined channels enter scope automatically. DMs and group DMs are explicitly excluded. A separate search explores other accessible public channels; both private inclusion and wider public discovery are configurable.
+
+Being in scope does **not** mean every channel or message is read. This is bounded keyword search, not exhaustive monitoring. The interface shows which searches completed, failed, or returned partial results.
+
+## How it works
 
 ```text
-Slack Events API
-    |
-    v
-Cloudflare Worker + Chat SDK Slack adapter
-    |-- channel messages, edits, deletes --> D1
-    |-- owner DM --------------------------> Slack Buddy Think agent
-    `-- feedback actions ------------------> profile memory
-
-Hourly scheduler (minute 17)
-    |-- expire raw messages and recover pending jobs
-    |-- refresh the shared Slack directory when its 24-hour cache expires
-    `-- after 08:00 Europe/Paris, start the previous day's digest
-                                  |
-                                  v
-Independent Cloudflare Workflow instances, linked by a D1 job ledger
-    |-- checkpoint up to 10 sync phases per instance; join up to 50 channels per batch
-    |-- reconcile recent history and active replies; periodically audit older parents
-    |-- group messages into threads
-    |-- apply must-show and low-signal rules
-    |-- batch-rank with zai-glm-5-2 on Mistral's API
-    |-- synthesize a source-grounded digest
-    `-- post or update the owner's Slack DM
+Authenticated private web app
+    → bounded searches through Mistral Slack MCP
+    → selected thread context
+    → one structured model summary with validated source IDs and excerpts
+    → browser results / explicit send to the owner
 ```
 
-Slack Buddy uses three separate state stores:
+Each standard briefing searches direct mentions, the first keyword of every priority, a rotating broader DevRel keyword, and an optional wider public keyword. Extra priority keywords rotate through spare search slots. Rotation is daily. At most ten search/thread tool calls are initiated, with a 65-second retrieval initiation budget, up to two thread expansions, and bounded model context. A started request can run past that budget until its own timeout. Transport initialization is additional MCP protocol traffic.
 
-- D1 stores retained Slack messages, digest runs, and the durable job ledger.
-- `ChatStateDO` stores Chat SDK locks, deduplication, and subscriptions.
-- `SlackBuddyAgent` stores the user's Think conversation and relevance profile.
+The connector currently supports keyword search, not semantic search. Spaces mean AND. Searches return at most 20 results per page; only mentions may get an extra page when budget permits. Auth/rate-limit failures stop further reads, and the app does not automatically retry them. Research uses one short query-planning model call before retrieval and one summarization call afterward.
 
-Raw Slack messages in D1 expire after 14 days by default. Hourly cleanup runs
-before Slack requests, independently of digest delivery. Digests, profile versions,
-and feedback remain available for learning and auditing. Completed job chains and
-their temporary artifacts are removed after the same retention interval; active
-chains are retained for recovery.
+Source text cannot select tools, alter channel scope, change settings, or choose a delivery destination. Results include verified Slack links and exact supporting excerpts. This validates provenance, not every interpretation: upcoming items distinguish confirmed/tentative/inferred claims, and content ideas require publication confirmation.
 
-"Learning" means versioned preference memory, not model fine-tuning. Relevant
-and not-relevant feedback adds bounded examples to the user's profile; handled
-items are recorded without changing topic preferences. In DM, you can also ask
-Slack Buddy to remember current priorities, add watched topics, or adjust
-relevance thresholds.
+## Local setup
 
-## Current scope
+Requires Node.js 22+ and the existing monorepo dependencies:
 
-- One Slack workspace and one authorized user per deployment.
-- Cross-channel search is only exposed through that user's DM with Slack Buddy.
-- Channel messages are ingested but Slack Buddy does not reply in public
-  channels.
-- Direct mentions are always considered for the daily digest.
-- Required mentions survive synthesis and the usual 15-item limit. Larger
-  briefings are delivered in multiple Slack messages with per-item feedback.
-- Slack Buddy automatically joins every non-archived public channel it is
-  permitted to join. Directory refreshes run at most once per 24 hours by default.
-- Private channels must explicitly invite the Slack Buddy app.
-- Files and message attachments are not ingested in the first version.
-
-## Prerequisites
-
-- Node.js 22 or newer
-- A Cloudflare account on **Workers Paid**
-- A Slack app approved for the target workspace
-- A Mistral API key with access to `zai-glm-5-2`
-
-## Install
-
-From the monorepo root:
-
-```bash
+```sh
 npm install
-cp slack-buddy/.env.example slack-buddy/.env
+cp -n slack-buddy/.env.example slack-buddy/.env
 ```
 
-Set local secrets in `slack-buddy/.env`:
+Set the following in `slack-buddy/.env`:
 
-```dotenv
-SLACK_BOT_TOKEN="xoxb-..."
-SLACK_SIGNING_SECRET="..."
-SLACK_USER_ID="U..."
-MISTRAL_API_KEY="..."
+| Variable                 | Purpose                                                             |
+| ------------------------ | ------------------------------------------------------------------- |
+| `MISTRAL_API_KEY`        | Server-side key for the approved Slack connector and model          |
+| `SLACK_USER_ID`          | Owner identity matching the connector's authenticated Slack account |
+| `SLACK_BUDDY_WEB_SECRET` | A separate random owner login key, at least 32 characters           |
+| `SLACK_BUDDY_LOCAL_DEV`  | `true` only for localhost development                               |
+
+Generate a new web login key with `openssl rand -hex 32`. Do not reuse the Mistral API key. The web key is also the session-signing secret; rotating it invalidates existing sessions. The interface is for a single owner, with a signed 12-hour cookie, same-origin mutation checks, and login throttling. It does not implement enterprise multi-user SSO.
+
+From the repository root:
+
+```sh
+npm run db:migrate:local --workspace @buddy/slack-buddy
+npm run dev:slack
 ```
 
-`.env` is for local Wrangler development only. It is gitignored and is not
-uploaded by a push or by Cloudflare Workers Builds. Configure the same values
-as Worker runtime secrets before production use.
+Open the local URL Wrangler prints and sign in with the owner access key. Preferences are saved in local D1; production D1 has separate preferences.
 
-The non-secret defaults are in `wrangler.jsonc`:
+## Deployment
 
-- Timezone: `Europe/Paris`
-- Digest eligibility: `08:00`; the hourly cron normally starts delivery at
-  approximately `08:17`
-- Auto-join public channels: enabled
-- Raw-message retention: 14 days
-- Slack reconciliation overlap: 48 hours
-- Directory cache: 24 hours
-- Full history audit interval: 7 days per channel
-- Sync phases per Workflow instance: 10 (configurable from 1 to 20)
-- Channel membership batch: up to 50 channels
-- CPU limit: 30 seconds; subrequest limit: 10,000
-- Model: `zai-glm-5-2`
+The app uses a Cloudflare Worker, D1 for preferences and run metadata, and an hourly Cron Trigger for housekeeping and optional daily briefings. Timezone and delivery hour are saved in the web app's Preferences. Model selection and scheduled-access availability are configured in `wrangler.jsonc`.
 
-## Create the Slack app
+For an existing deployment, complete the [one-time infrastructure transition](docs/deployment-transition.md) first. That note documents migration requirements; it is not application setup.
 
-1. Open the Slack app management page and create an app from
-   `slack-manifest.bootstrap.json`. This version does not require a live webhook.
-2. Install the app to the workspace.
-3. Copy the Bot User OAuth Token and Signing Secret.
-4. Set `SLACK_USER_ID` to the only Slack member allowed to use the assistant.
-5. After deploying Slack Buddy, replace `YOUR-WORKER` in
-   `slack-manifest.json` with the deployed Worker subdomain and apply that full
-   manifest.
-6. Invite Slack Buddy to every private channel it should monitor. Public
-   channels are joined automatically unless Slack restricts app membership.
+From the repository root, apply the D1 migrations:
 
-The app requests:
-
-- Message history plus channel and user directory data
-- DM access for the interactive assistant
-- `chat:write` for answers and daily briefings
-- `users:read` for attribution
-
-## Create Cloudflare resources
-
-Run the Cloudflare commands in this section from `slack-buddy/`.
-
-The Cloudflare resource names are:
-
-- Worker: `slack-buddy`
-- D1 database: `slack-buddy-db`
-- Workflow: `slack-buddy-digest`
-- Durable Object agent class: `SlackBuddyAgent`
-
-Create D1 and replace the placeholder `database_id` in `wrangler.jsonc`:
-
-```bash
-cd slack-buddy
-npx wrangler d1 create slack-buddy-db
+```sh
+npm run db:migrate:remote --workspace @buddy/slack-buddy
 ```
 
-Copy the returned database ID into `wrangler.jsonc`, replacing
-`00000000-0000-0000-0000-000000000000`, then apply the schema:
+From `slack-buddy`, configure production secrets interactively:
 
-```bash
-npm run db:migrate:remote
-```
-
-Deployments do not apply D1 migrations automatically. Run the remote migration
-command once during initial setup and whenever a future release adds a
-migration.
-
-Store production secrets:
-
-```bash
-npx wrangler secret put SLACK_BOT_TOKEN
-npx wrangler secret put SLACK_SIGNING_SECRET
-npx wrangler secret put SLACK_USER_ID
+```sh
 npx wrangler secret put MISTRAL_API_KEY
-npx wrangler secret list
+npx wrangler secret put SLACK_USER_ID
+npx wrangler secret put SLACK_BUDDY_WEB_SECRET
 ```
 
-These are runtime secrets. If using the dashboard, add them under the
-`slack-buddy` Worker's **Settings > Variables & Secrets**, not only under its
-build settings. The final command should list all four names without exposing
-their values.
+Retain valid existing values for the connector key and owner ID. Keep `SLACK_BUDDY_LOCAL_DEV` unset in production. Then deploy from the repository root:
 
-## Deploy
-
-For a manual deployment from `slack-buddy/`:
-
-```bash
-npm run deploy
+```sh
+npm run deploy --workspace @buddy/slack-buddy
 ```
 
-For automatic deployment with Cloudflare Workers Builds, create a separate
-build configuration for the `slack-buddy` Worker. Keep the repository root as
-the build root so npm uses the monorepo lockfile, and configure:
+Check `/health` for `mode: "mcp"`, sign in with the owner access key, generate a briefing, inspect coverage, and test delivery of a reviewed briefing to yourself. Live sending and sender identity still need verification; the development benchmark sent no Slack messages.
 
-- Production branch: `main`
-- Build command: leave empty
-- Deploy command:
-  `npm run deploy --workspace @buddy/slack-buddy`
-- Runtime secrets: configure them under **Settings > Variables & Secrets**
+## Morning delivery
 
-The Changelog Buddy build is a separate Worker and does not deploy Slack Buddy.
-Optional build watch paths can limit Slack Buddy deployments to changes under
-`slack-buddy/` plus the root `package.json` and `package-lock.json`.
+Daily generation and owner delivery are implemented but **disabled by default**. Slack's underlying [real-time search guidance](https://docs.slack.dev/apis/web-api/real-time-search-api/) describes user-initiated retrieval and restricts storing retrieved data. Verify that this approved gateway supports unattended scheduled retrieval before enabling it; connector availability alone does not establish that support.
 
-## Activate Slack webhooks
+Once supported, set `SLACK_BUDDY_SCHEDULED_MCP_ENABLED` to `"true"` in Wrangler configuration and deploy, then enable daily delivery in Preferences. Defaults are 08:00 Europe/Paris. The hourly trigger checks the configured local hour, retrieves the previous local calendar day, and starts at most one run per owner/date. A missed hour can be caught by a later check that day. Generation time comes after the scheduled hour.
 
-After the first successful deployment:
+Daily runs do not retry automatically after failure. Manual runs remain available. Delivery records intent before the first send; an ambiguous or partly completed multipart send becomes `uncertain` and is never blindly resent. Check Slack before taking further action. An interrupted send may remain `sending`, also preventing retries. Briefings are split below the gateway's 5,000-character text limit.
 
-1. Confirm the health endpoint responds:
+## Data and retention
 
-   ```bash
-   curl "https://<your-worker>.workers.dev/health"
-   ```
+New MCP source text, generated briefings, and research conversation stay transient in the request/browser session. They are not written to D1, local storage, or application logs. Refreshing or signing out clears the displayed briefing and conversational context. Model calls send the bounded source context to Mistral using the configured model.
 
-   The response should contain `"name":"Slack Buddy"` and `"status":"ok"`.
+D1 stores explicit preferences and user-entered feedback topics, hashed login-throttle keys, and operational run metadata. Run history is retained for 30 days. Avoid copying Slack excerpts into preference fields or enabling payload logging/tracing in future changes.
 
-2. Replace both `YOUR-WORKER` placeholders in `slack-manifest.json` with the
-   deployed Worker hostname. Both resulting request URLs should be:
+## Verification and performance
 
-   ```text
-   https://<your-worker>.workers.dev/webhooks/slack
-   ```
-
-3. Apply the full JSON manifest to the existing Slack app. Confirm that Slack
-   verifies the Events API and interactivity request URLs.
-4. Reinstall or request approval again only if Slack indicates that the
-   manifest change requires it.
-5. Invite Slack Buddy to every private channel it should monitor. Public
-   channels are discovered and joined when the directory cache next refreshes
-   (checked hourly at minute `17`), subject to workspace restrictions.
-
-## Verify production
-
-Run this checklist after the full Slack manifest is active. Run the Wrangler
-commands below from `slack-buddy/`.
-
-1. DM Slack Buddy from the member identified by `SLACK_USER_ID`. It should
-   answer; messages from other members are intentionally ignored.
-2. After Slack Buddy has joined a public channel, post a harmless test message
-   there.
-3. Confirm that the message reached D1:
-
-   ```bash
-   npx wrangler d1 execute slack-buddy-db --remote \
-     --command "SELECT COUNT(*) AS message_count FROM slack_messages"
-   ```
-
-4. Inspect runtime logs if either test fails:
-
-   ```bash
-   npx wrangler tail slack-buddy
-   ```
-
-5. Confirm the next briefing arrives after approximately `08:17`
-   `Europe/Paris`. It summarizes the previous local calendar day.
-
-## Upgrade and recover a missed briefing
-
-The pipeline requires `0002_bounded_jobs.sql` for the job ledger and
-`0003_incremental_sync.sql` for directory caching and history coverage. From
-`slack-buddy/`, apply migrations **before** deploying the new Worker:
-
-```bash
-npm run db:migrate:remote
-npm run deploy
+```sh
+npm run check --workspace @buddy/slack-buddy
+npm run format:check --workspace @buddy/slack-buddy
+npm run deploy:dry-run --workspace @buddy/slack-buddy
 ```
 
-On the next hourly tick at minute `17`, the scheduler queues new bounded jobs
-for unfinished digests, including failed runs from older dates. Their digest IDs
-and Slack delivery markers stay the same, but their Workflow instance IDs change.
-Restarting an old monolithic Workflow keeps its old deployed code and does not
-apply this fix. The scheduler waits for any still-running old instance to finish
-before migrating that digest, preventing overlapping old and new pipelines.
+Tests cover scope/time boundaries, response parsing, grounding, budgets, rate limits, owner auth/CSRF, settings concurrency, execution leases, scheduling, and uncertain-delivery suppression. Browser checks exercise desktop/mobile login, settings, result cards, research, and simulated delivery.
 
-Inspect overall progress in D1; the latest Workflow instance represents just one
-job, so its completion alone no longer proves that the briefing was delivered:
+A live read/model benchmark on 2026-09-11 used three searches and one thread read over seven days: **59 distinct candidates in 6.7 seconds, then 13 source-grounded items in 14.3 seconds** (about 21 seconds total). Coverage was partial because more search results remained. This is a bounded sample, not a daily-run latency guarantee. `scripts/benchmark-mcp.ts` contains the opt-in benchmark; it never sends Slack messages.
 
-```bash
-npx wrangler d1 execute slack-buddy-db --remote --command \
-  "SELECT id, local_date, status, workflow_instance_id, error FROM digest_runs ORDER BY local_date DESC LIMIT 5"
-npx wrangler d1 execute slack-buddy-db --remote --command \
-  "SELECT id, run_key, sequence, status, error FROM slack_jobs WHERE status != 'completed' ORDER BY updated_at LIMIT 25"
-```
-
-Use a returned job ID to inspect the failing instance:
-
-```bash
-npx wrangler workflows instances describe slack-buddy-digest <job-id>
-```
-
-The digest's `completed` status means all its Slack message parts were delivered.
-Recovery can only use raw messages still inside the retention window.
-
-Existing `free-v1` job IDs remain valid: that prefix identifies the ledger protocol,
-not the Cloudflare plan. Existing Workflow instances remain pinned to their deployed
-code; new instances use the new deployment. Completed work and delivery markers
-are preserved. Each channel needs an initial full audit to establish the new scan
-coverage before later digests can use incremental history.
-
-The Paid configuration uses `SLACK_BUDDY_JOB_PHASES` (default `10`, maximum `20`),
-`SLACK_BUDDY_DIRECTORY_REFRESH_HOURS` (default `24`), and
-`SLACK_BUDDY_FULL_SCAN_DAYS` (default `7`). Smaller phase counts reduce the retry
-scope of a Workflow instance; larger counts reduce instance and ledger overhead.
-Slack's own rate limits still apply.
-
-## Local development
-
-Apply the local migration and start Wrangler:
-
-```bash
-npm run db:migrate:local
-npm run dev
-```
-
-Slack cannot call localhost directly. Use a secure tunnel for webhook testing,
-or deploy a development Worker and point a separate Slack test app at it.
-
-To exercise the scheduled handler locally, start Wrangler with
-`npm run dev -- --test-scheduled`, then request
-`http://localhost:8787/__scheduled`.
-
-## Troubleshooting
-
-- `invalid_auth`: verify the production `SLACK_BOT_TOKEN`.
-- Slack request-signature failures: verify `SLACK_SIGNING_SECRET`.
-- Missing-table errors: apply the remote D1 migrations, including
-  `0002_bounded_jobs.sql` for the job ledger and `0003_incremental_sync.sql`
-  for directory and history sync state.
-- `Too many subrequests by single Worker invocation` on an old digest instance:
-  upgrade to the bounded job pipeline and follow the recovery steps above.
-  Workers Free permits 50 external requests per invocation; extra Workflow steps
-  alone do not create a new allowance. See Cloudflare's
-  [Workflow limits](https://developers.cloudflare.com/workflows/reference/limits/).
-- DMs receive no answer: verify the full manifest's `message.im` subscription,
-  the request URL, and `SLACK_USER_ID`.
-- Public messages are absent from D1: confirm the app joined the channel and
-  that `message.channels` is subscribed.
-- Private messages are absent from D1: invite the app to the private channel
-  and confirm `message.groups` is subscribed.
-- Workflow or model errors: inspect `npx wrangler tail slack-buddy` and confirm
-  `MISTRAL_API_KEY` and model access.
-
-## Reliability model
-
-- Slack event writes are idempotent by workspace, channel, and message
-  timestamp.
-- Ingestion preserves Slack's raw mention identifiers alongside message text.
-- Chat SDK dispatches overlapping messages concurrently; D1 timestamps and
-  unique keys make those writes order-independent and idempotent.
-- Edits and deletions update existing D1 rows.
-- Each digest has a stable digest ID; each job has its own deterministic
-  `slack-buddy-free-v1-<run-hash>-<sequence>` Workflow instance ID.
-- The D1 job ledger stores each successor atomically with its predecessor's
-  completion, before Workflow creation. The scheduler recovers a pending
-  successor if that creation fails, without repeating completed parent work.
-- One instance checkpoints up to 10 sync phases by default, each performing
-  one directory/history/replies page or up to 50 membership operations. Model
-  batches, synthesis, and delivery remain separate jobs. Successful phase
-  checkpoints are reused when a later phase retries.
-- Each sync phase permits one Workflow retry and two transport retries per
-  Slack request. The maximum configuration of 20 phases therefore bounds
-  external requests at 6,000 per instance, below the configured Paid limit of
-  10,000. Delivery has no immediate Workflow retry; failures wait for recovery.
-- A successful directory refresh publishes a reusable snapshot of accessible
-  channels and refreshes users. Digests reuse that snapshot for 24 hours by
-  default; the hourly scheduler also skips fresh snapshots. A run keeps its
-  chosen snapshot across retries and restarts, even if the cache later expires.
-  Published channel snapshots are immutable, and replaying their jobs does not
-  renew their freshness. Concurrent cold starts may both refresh before either
-  publishes a snapshot.
-- Unchanged user/channel upserts and duplicate or older message updates do
-  not rewrite rows. Message ordering watermarks still advance when needed to
-  protect against out-of-order edits. History reads do not create synthetic
-  webhook audit rows. Genuine webhook event IDs remain deduplicated.
-- History coverage advances only after all pages for a channel succeed.
-  Ordinary scans use a 48-hour overlap behind the previous completed scan,
-  extending back to the digest window when needed and bounded by raw-message
-  retention. Bounds are persisted for retries and concurrent runs.
-- Initial and periodic full audits scan older parents too, without storing raw
-  text outside retention. The default audit interval is seven days. Webhook
-  replies on older parents seed reconciliation targets on every digest. A missed
-  webhook reply to an older parent outside the overlap may only be discovered
-  by the next full audit; it is not guaranteed to appear in the next daily digest.
-- Cached conversations that become inaccessible and threads that have been
-  deleted are skipped without advancing their history coverage. Authentication,
-  scope, and other unexpected failures remain retryable job failures.
-- Job payloads and history checkpoints contain identifiers and cursors, not
-  copies of raw source messages. Ranking reloads only the selected batch's
-  threads using indexed thread lookups, with retained earlier context, instead
-  of scanning all retained messages for each batch.
-- Active threads include retained context from before the briefing window;
-  mentions in that earlier context do not trigger another required item.
-- Ranked item IDs are derived from validated sources, so independent model
-  batches cannot collide and exchange source links during synthesis.
-- Before posting, delivery searches recent DM history for Slack Buddy's
-  deterministic Block Kit marker and updates an existing digest instead of
-  reposting. Every part of a multi-message digest has its own marker, allowing
-  recovery after only some parts have been delivered. Delivered page references
-  are stored in D1. A durable write-intent marker makes recovery restart its
-  history search from the newest message if Slack accepted a write but its
-  response was lost.
-- The hourly reconciler checks all unfinished digest runs, including older
-  dates and runs checked before the next delivery time, in bounded sweeps of
-  up to 25 digest runs and 25 jobs. Only one hourly directory chain is active
-  at a time, and a new refresh starts only when the cache is stale. Cron itself
-  only calls Slack for authentication; directory scans
-  and joins run in their own jobs.
-- Slack history reconciliation repairs webhook gaps before every digest.
-- Slack Web API requests are intercepted to use Cloudflare's supported
-  `cache: "no-store"` mode; Axios `1.20.0` otherwise sends the unsupported
-  `cache: "default"` value.
-- Workflow API calls validate Slack's `ok` field, including HTTP-200 errors,
-  and retry explicit rate limits twice while honoring `Retry-After`. Ambiguous
-  failed writes are left to digest delivery recovery instead of blindly reposted.
-- Feedback reads the current profile after external I/O and persists its next
-  version without yielding, preserving overlapping feedback and explicit edits.
-
-## Security model
-
-- Only `SLACK_USER_ID` can interact with Slack Buddy or submit learning
-  feedback.
-- Cross-channel retrieval is DM-only.
-- Slack text is treated as untrusted data.
-- Digest ranking uses structured output without agent tools.
-- Interactive Think turns use an allowlist of search, digest, profile, and
-  explicit preference-update tools.
-- Raw message text is deleted on the configured retention schedule.
-- Secrets live in Wrangler secrets and are never committed.
-
-Before using Slack Buddy with corporate Slack, confirm that storing Slack
-content in Cloudflare D1 and sending selected content to Mistral's API is
-approved.
-
-## Commands
-
-From the monorepo root:
-
-```bash
-npm run typecheck
-npm test
-npm run check
-npm run deploy:dry-run:slack
-```
-
-This configuration targets Workers Paid. The subscription includes larger
-allowances, but Workflow steps, D1/Durable Objects operations, and CPU usage can
-incur charges above included amounts. Directory caching, incremental history,
-and larger jobs reduce repeated work. Mistral model usage is billed separately
-unless covered by your account.
+See [the architecture](docs/architecture.md) for implementation details.

@@ -5,14 +5,7 @@
   "compatibility_date": "2026-09-05",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "SLACK_BUDDY_TIMEZONE": "Europe/Paris",
-    "SLACK_BUDDY_DIGEST_HOUR": "8",
-    "SLACK_BUDDY_AUTO_JOIN_PUBLIC_CHANNELS": "true",
-    "SLACK_BUDDY_RETENTION_DAYS": "14",
-    "SLACK_BUDDY_RECONCILE_HOURS": "48",
-    "SLACK_BUDDY_DIRECTORY_REFRESH_HOURS": "24",
-    "SLACK_BUDDY_FULL_SCAN_DAYS": "7",
-    "SLACK_BUDDY_JOB_PHASES": "10",
+    "SLACK_BUDDY_SCHEDULED_MCP_ENABLED": "false",
     "MISTRAL_MODEL": "zai-glm-5-2",
   },
   "d1_databases": [
@@ -23,33 +16,20 @@
       "migrations_dir": "migrations",
     },
   ],
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "SLACK_BUDDY_AGENT",
-        "class_name": "SlackBuddyAgent",
-      },
-      {
-        "name": "CHAT_STATE",
-        "class_name": "ChatStateDO",
-      },
-    ],
-  },
+  // Deployment history only. The MCP app has no Durable Object bindings.
+  // v2 retires these namespaces and deletes their stored data on deployment.
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["SlackBuddyAgent", "ChatStateDO"],
     },
-  ],
-  "workflows": [
     {
-      "name": "slack-buddy-digest",
-      "binding": "DIGEST_WORKFLOW",
-      "class_name": "SlackBuddyDigestWorkflow",
+      "tag": "v2-mcp-only",
+      "deleted_classes": ["SlackBuddyAgent", "ChatStateDO"],
     },
   ],
   "triggers": {
-    "crons": ["17 * * * *"],
+    "crons": ["0 * * * *"],
   },
   "limits": { "cpu_ms": 30000, "subrequests": 10000 },
   "observability": {
