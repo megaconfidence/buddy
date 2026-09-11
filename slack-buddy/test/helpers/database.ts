@@ -1,15 +1,15 @@
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 
 /** Execute repository SQL against SQLite; only the D1 transport is adapted. */
 export function testDatabase() {
   const sqlite = new DatabaseSync(":memory:");
-  sqlite.exec(
-    readFileSync(
-      new URL("../../migrations/0001_initial.sql", import.meta.url),
-      "utf8",
-    ),
-  );
+  const migrations = new URL("../../migrations/", import.meta.url);
+  for (const file of readdirSync(migrations)
+    .filter((name) => name.endsWith(".sql"))
+    .sort()) {
+    sqlite.exec(readFileSync(new URL(file, migrations), "utf8"));
+  }
   const prepare = (sql: string, values: unknown[] = []): D1PreparedStatement =>
     ({
       bind: (...next: unknown[]) => prepare(sql, next),

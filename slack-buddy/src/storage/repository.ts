@@ -117,7 +117,10 @@ export class SlackBuddyRepository {
           name = COALESCE(excluded.name, slack_channels.name),
           is_private = excluded.is_private,
           is_archived = excluded.is_archived,
-          updated_at = excluded.updated_at`,
+          updated_at = excluded.updated_at
+          WHERE COALESCE(excluded.name, slack_channels.name) IS NOT slack_channels.name
+            OR excluded.is_private IS NOT slack_channels.is_private
+            OR excluded.is_archived IS NOT slack_channels.is_archived`,
       )
       .bind(
         input.teamId,
@@ -142,7 +145,8 @@ export class SlackBuddyRepository {
         ) VALUES (?, ?, ?, 0, 0, ?)
         ON CONFLICT(team_id, channel_id) DO UPDATE SET
           name = COALESCE(excluded.name, slack_channels.name),
-          updated_at = excluded.updated_at`,
+          updated_at = excluded.updated_at
+          WHERE COALESCE(excluded.name, slack_channels.name) IS NOT slack_channels.name`,
       )
       .bind(input.teamId, input.channelId, input.name, Date.now())
       .run();
@@ -169,7 +173,10 @@ export class SlackBuddyRepository {
                 name = COALESCE(excluded.name, slack_channels.name),
                 is_private = excluded.is_private,
                 is_archived = excluded.is_archived,
-                updated_at = excluded.updated_at`,
+                updated_at = excluded.updated_at
+          WHERE COALESCE(excluded.name, slack_channels.name) IS NOT slack_channels.name
+            OR excluded.is_private IS NOT slack_channels.is_private
+            OR excluded.is_archived IS NOT slack_channels.is_archived`,
             )
             .bind(
               input.teamId,
@@ -200,7 +207,10 @@ export class SlackBuddyRepository {
           display_name = COALESCE(excluded.display_name, slack_users.display_name),
           real_name = COALESCE(excluded.real_name, slack_users.real_name),
           is_bot = excluded.is_bot,
-          updated_at = excluded.updated_at`,
+          updated_at = excluded.updated_at
+          WHERE COALESCE(excluded.display_name, slack_users.display_name) IS NOT slack_users.display_name
+            OR COALESCE(excluded.real_name, slack_users.real_name) IS NOT slack_users.real_name
+            OR excluded.is_bot IS NOT slack_users.is_bot`,
       )
       .bind(
         input.teamId,
@@ -234,7 +244,10 @@ export class SlackBuddyRepository {
                 display_name = COALESCE(excluded.display_name, slack_users.display_name),
                 real_name = COALESCE(excluded.real_name, slack_users.real_name),
                 is_bot = excluded.is_bot,
-                updated_at = excluded.updated_at`,
+                updated_at = excluded.updated_at
+          WHERE COALESCE(excluded.display_name, slack_users.display_name) IS NOT slack_users.display_name
+            OR COALESCE(excluded.real_name, slack_users.real_name) IS NOT slack_users.real_name
+            OR excluded.is_bot IS NOT slack_users.is_bot`,
             )
             .bind(
               input.teamId,
@@ -253,7 +266,15 @@ export class SlackBuddyRepository {
     teamId: string,
     startMs: number,
     endMs: number,
+    threadIds?: string[],
   ): Promise<MessageWithDisplay[]> {
+    if (threadIds?.length === 0) return [];
+    const selected = threadIds?.map((id) => {
+      const [threadTeam, channelId, threadTs] = id.split(":");
+      if (threadTeam !== teamId || !channelId || !threadTs)
+        throw new Error("Invalid candidate thread identity");
+      return { channelId, threadTs };
+    });
     const result = await this.db
       .prepare(
         `SELECT
@@ -261,7 +282,15 @@ export class SlackBuddyRepository {
           m.user_id, m.text, m.subtype, m.posted_at, m.event_time,
           m.edited_at, m.deleted_at, c.name AS channel_name,
           COALESCE(u.display_name, u.real_name) AS user_name, u.is_bot
-        FROM slack_messages m
+        ${
+          selected
+            ? // Fix the join order: start with the small batch, then seek each
+              // thread's index range instead of scanning the team's retention.
+              `FROM json_each(?) target CROSS JOIN slack_messages m
+          ON m.channel_id = json_extract(target.value, '$.channelId')
+          AND m.thread_ts = json_extract(target.value, '$.threadTs')`
+            : "FROM slack_messages m"
+        }
         LEFT JOIN slack_channels c
           ON c.team_id = m.team_id AND c.channel_id = m.channel_id
         LEFT JOIN slack_users u
@@ -277,7 +306,13 @@ export class SlackBuddyRepository {
           )
         ORDER BY m.posted_at ASC`,
       )
-      .bind(teamId, endMs, startMs, endMs)
+      .bind(
+        ...(selected ? [JSON.stringify(selected)] : []),
+        teamId,
+        endMs,
+        startMs,
+        endMs,
+      )
       .all<MessageRow>();
 
     return result.results.map(mapMessageRow);
@@ -368,6 +403,7 @@ export class SlackBuddyRepository {
   async listIncompleteDigestRuns(
     teamId: string,
     userId: string,
+    withoutJobs = false,
   ): Promise<DigestRunRow[]> {
     const result = await this.db
       .prepare(
@@ -375,9 +411,10 @@ export class SlackBuddyRepository {
         workflow_instance_id, status, slack_channel_id, slack_message_ts, error
        FROM digest_runs
        WHERE team_id = ? AND user_id = ? AND status != 'completed'
-       ORDER BY local_date ASC`,
+         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM slack_jobs j WHERE j.run_key = digest_runs.id AND j.sequence = 0))
+       ORDER BY local_date ASC LIMIT 25`,
       )
-      .bind(teamId, userId)
+      .bind(teamId, userId, Number(withoutJobs))
       .all<DigestRunRow>();
     return result.results;
   }
@@ -401,7 +438,7 @@ export class SlackBuddyRepository {
         `UPDATE digest_runs
         SET status = 'running', started_at = COALESCE(started_at, ?),
             error = NULL, updated_at = ?
-        WHERE id = ?`,
+        WHERE id = ? AND status != 'completed' AND (status != 'running' OR error IS NOT NULL)`,
       )
       .bind(Date.now(), Date.now(), id)
       .run();
@@ -465,7 +502,7 @@ export class SlackBuddyRepository {
       .prepare(
         `UPDATE digest_runs
         SET status = 'failed', error = ?, updated_at = ?
-        WHERE id = ?`,
+        WHERE id = ? AND status != 'completed'`,
       )
       .bind(error.slice(0, 2_000), Date.now(), id)
       .run();
@@ -577,6 +614,47 @@ export class SlackBuddyRepository {
       .run();
   }
 
+  async getChannelSync(teamId: string, channelId: string) {
+    return this.db
+      .prepare(
+        "SELECT history_through,full_scan_through FROM channel_sync_state WHERE team_id = ? AND channel_id = ?",
+      )
+      .bind(teamId, channelId)
+      .first<{ history_through: number; full_scan_through: number | null }>();
+  }
+
+  async completeChannelSync(
+    teamId: string,
+    channelId: string,
+    throughMs: number,
+    fullScan: boolean,
+  ) {
+    await this.db
+      .prepare(
+        `INSERT INTO channel_sync_state (team_id,channel_id,history_through,full_scan_through)
+      VALUES (?,?,?,?) ON CONFLICT(team_id,channel_id) DO UPDATE SET
+      history_through = MAX(channel_sync_state.history_through,excluded.history_through),
+      full_scan_through = CASE WHEN excluded.full_scan_through IS NULL THEN channel_sync_state.full_scan_through
+        ELSE MAX(COALESCE(channel_sync_state.full_scan_through,0),excluded.full_scan_through) END
+      WHERE excluded.history_through > channel_sync_state.history_through
+        OR COALESCE(excluded.full_scan_through,0) > COALESCE(channel_sync_state.full_scan_through,0)`,
+      )
+      .bind(teamId, channelId, throughMs, fullScan ? throughMs : null)
+      .run();
+  }
+
+  async activeReplyTargets(teamId: string, startMs: number, endMs: number) {
+    const result = await this.db
+      .prepare(
+        `SELECT DISTINCT channel_id AS channelId,thread_ts AS threadTs
+      FROM slack_messages WHERE team_id = ? AND posted_at >= ? AND posted_at < ? AND deleted_at IS NULL
+        AND thread_ts != message_ts`,
+      )
+      .bind(teamId, startMs, endMs)
+      .all<{ channelId: string; threadTs: string }>();
+    return result.results;
+  }
+
   async updateChannelCursor(input: {
     teamId: string;
     channelId: string;
@@ -589,7 +667,8 @@ export class SlackBuddyRepository {
         ) VALUES (?, ?, ?, ?)
         ON CONFLICT(team_id, channel_id) DO UPDATE SET
           latest_ts = MAX(excluded.latest_ts, channel_cursors.latest_ts),
-          reconciled_at = excluded.reconciled_at`,
+          reconciled_at = excluded.reconciled_at
+        WHERE excluded.latest_ts > channel_cursors.latest_ts`,
       )
       .bind(input.teamId, input.channelId, input.latestTs, Date.now())
       .run();
@@ -609,13 +688,17 @@ export class SlackBuddyRepository {
   private messageStatements(message: SlackMessage): D1PreparedStatement[] {
     const now = Date.now();
     return [
-      this.db
-        .prepare(
-          `INSERT OR IGNORE INTO slack_events (
+      ...(!message.eventId.startsWith("history:")
+        ? [
+            this.db
+              .prepare(
+                `INSERT OR IGNORE INTO slack_events (
             event_id, team_id, event_type, received_at
           ) VALUES (?, ?, ?, ?)`,
-        )
-        .bind(message.eventId, message.teamId, "message", now),
+              )
+              .bind(message.eventId, message.teamId, "message", now),
+          ]
+        : []),
       this.db
         .prepare(
           `INSERT INTO slack_messages (
@@ -657,7 +740,15 @@ export class SlackBuddyRepository {
               slack_messages.deleted_at,
               excluded.deleted_at
             ),
-            updated_at = excluded.updated_at`,
+            updated_at = excluded.updated_at
+          WHERE (excluded.event_time >= slack_messages.event_time AND (
+            excluded.event_time > slack_messages.event_time
+            OR excluded.thread_ts IS NOT slack_messages.thread_ts
+            OR excluded.text IS NOT slack_messages.text
+            OR excluded.subtype IS NOT slack_messages.subtype
+          )) OR COALESCE(excluded.user_id, slack_messages.user_id) IS NOT slack_messages.user_id
+            OR COALESCE(excluded.edited_at, 0) > COALESCE(slack_messages.edited_at, 0)
+            OR (slack_messages.deleted_at IS NULL AND excluded.deleted_at IS NOT NULL)`,
         )
         .bind(
           message.teamId,

@@ -10,6 +10,9 @@
     "SLACK_BUDDY_AUTO_JOIN_PUBLIC_CHANNELS": "true",
     "SLACK_BUDDY_RETENTION_DAYS": "14",
     "SLACK_BUDDY_RECONCILE_HOURS": "48",
+    "SLACK_BUDDY_DIRECTORY_REFRESH_HOURS": "24",
+    "SLACK_BUDDY_FULL_SCAN_DAYS": "7",
+    "SLACK_BUDDY_JOB_PHASES": "10",
     "MISTRAL_MODEL": "zai-glm-5-2",
   },
   "d1_databases": [
@@ -48,6 +51,7 @@
   "triggers": {
     "crons": ["17 * * * *"],
   },
+  "limits": { "cpu_ms": 30000, "subrequests": 10000 },
   "observability": {
     "enabled": true,
     "traces": {

@@ -5,28 +5,22 @@ import {
   targetDigestDate,
   retentionCutoffMs,
 } from "./domain/time";
-import type { DigestWorkflowParams } from "./domain/types";
+import { syncSettings } from "./domain/sync";
+import { initialDigestJob } from "./domain/jobs";
 import type { Env } from "./env";
-import { ensurePublicChannelMembership, getSlackIdentity } from "./slack/api";
-import { SlackBuddyRepository, type DigestRunRow } from "./storage/repository";
+import { getSlackIdentity } from "./slack/api";
+import { SlackBuddyRepository } from "./storage/repository";
+import { SlackJobRepository } from "./storage/jobs";
+import { launchSlackJob } from "./workflows/jobs";
 
-export async function reconcileDigestSchedule(
-  env: Env,
-  nowMs = Date.now(),
-): Promise<{
-  teamId: string;
-  digestId: string | null;
-  action:
-    | "before_delivery_time"
-    | "completed"
-    | "created"
-    | "running"
-    | "restarted";
-}> {
+export async function reconcileDigestSchedule(env: Env, nowMs = Date.now()) {
   const repository = new SlackBuddyRepository(env.DB);
-  // Retention must run before any Slack request, even before delivery time or
-  // while Slack/model credentials are unavailable.
+  const jobs = new SlackJobRepository(env.DB);
+  // Cleanup must run even if Slack authentication or job recovery fails.
   await repository.deleteExpiredData(
+    retentionCutoffMs(env.SLACK_BUDDY_RETENTION_DAYS, nowMs),
+  );
+  await jobs.deleteExpiredCompletedRuns(
     retentionCutoffMs(env.SLACK_BUDDY_RETENTION_DAYS, nowMs),
   );
   const { teamId } = await getSlackIdentity(env.SLACK_BOT_TOKEN);
@@ -38,42 +32,86 @@ export async function reconcileDigestSchedule(
   const digestId = targetDate
     ? safeWorkflowId(`slack-buddy-${targetDate}-${teamId}-${env.SLACK_USER_ID}`)
     : null;
-  if (targetDate && digestId) {
+  if (targetDate && digestId)
     await repository.createDigestRun({
       id: digestId,
       teamId,
       userId: env.SLACK_USER_ID,
       window: digestWindowForDate(targetDate, env.SLACK_BUDDY_TIMEZONE),
     });
-  }
-
-  let action:
-    | "before_delivery_time"
-    | "completed"
-    | "created"
-    | "running"
-    | "restarted" = digestId ? "completed" : "before_delivery_time";
   const errors: unknown[] = [];
   for (const run of await repository.listIncompleteDigestRuns(
     teamId,
     env.SLACK_USER_ID,
+    true,
   )) {
     try {
-      const recovered = await reconcileDigestRun(env, repository, run);
-      if (run.id === digestId) action = recovered;
+      // A deployment does not interrupt old instances. Let an active legacy
+      // instance finish before migrating it to avoid concurrent delivery.
+      if (
+        run.status === "running" &&
+        run.workflow_instance_id &&
+        !run.workflow_instance_id.startsWith("slack-buddy-free-v1-")
+      ) {
+        const legacy = await env.DIGEST_WORKFLOW.get(run.workflow_instance_id);
+        const status = await legacy.status();
+        if (!["errored", "terminated", "complete"].includes(status.status))
+          continue;
+        if ((await repository.getDigestRun(run.id))?.status === "completed")
+          continue;
+      }
+      // New IDs run the bounded implementation, including recovery of failed
+      // monolithic instances pinned to a previous deployment.
+      await jobs.enqueue(
+        initialDigestJob({
+          digestId: run.id,
+          teamId: run.team_id,
+          userId: run.user_id,
+          window: {
+            localDate: run.local_date,
+            timezone: run.timezone,
+            startMs: run.window_start,
+            endMs: run.window_end,
+          },
+        }),
+      );
     } catch (error) {
       errors.push(error);
-      console.error("Slack Buddy could not reconcile a digest", {
-        digestId: run.id,
+    }
+  }
+  if (
+    !(await jobs.freshDirectory(
+      teamId,
+      nowMs - syncSettings(env).directoryTtlMs,
+    ))
+  )
+    await jobs.enqueueDirectory({
+      protocol: "free-v1",
+      runKey: `directory:${teamId}:${Math.floor(nowMs / 3_600_000)}`,
+      teamId,
+      userId: env.SLACK_USER_ID,
+      digest: null,
+      sequence: 0,
+      phase: { kind: "start" },
+    });
+  let action: string = digestId ? "completed" : "before_delivery_time";
+  if (
+    digestId &&
+    (await repository.getDigestRun(digestId))?.status !== "completed"
+  )
+    action = "running";
+  // Bounded recovery sweep; no directory pagination or joins in the cron invocation.
+  for (const job of await jobs.listIncomplete(teamId)) {
+    try {
+      const recovered = await launchSlackJob(env, job, true);
+      if (job.params.digest?.digestId === digestId) action = recovered;
+    } catch (error) {
+      errors.push(error);
+      console.error("Slack Buddy could not recover a job", {
+        jobId: job.id,
         error: String(error),
       });
     }
-  }
-  // Channel discovery cannot prevent recovery of already-recorded runs.
-  try {
-    await ensurePublicChannelMembership(env, teamId);
-  } catch (error) {
-    errors.push(error);
   }
   if (errors.length)
     throw new AggregateError(
@@ -81,63 +119,6 @@ export async function reconcileDigestSchedule(
       "Slack Buddy scheduled maintenance failed",
     );
   return { teamId, digestId, action };
-}
-
-async function reconcileDigestRun(
-  env: Env,
-  repository: SlackBuddyRepository,
-  run: DigestRunRow,
-): Promise<"completed" | "created" | "running" | "restarted"> {
-  const params: DigestWorkflowParams = {
-    digestId: run.id,
-    teamId: run.team_id,
-    userId: run.user_id,
-    window: {
-      localDate: run.local_date,
-      timezone: run.timezone,
-      startMs: run.window_start,
-      endMs: run.window_end,
-    },
-  };
-  let instance: WorkflowInstance | undefined;
-  let created = false;
-  try {
-    [instance] = await env.DIGEST_WORKFLOW.createBatch([
-      { id: run.id, params },
-    ]);
-    created = Boolean(instance);
-  } catch (createError) {
-    // Existing deterministic IDs throw on some runtimes. Preserve the create
-    // error if lookup also fails (for example, a workflow service outage).
-    try {
-      instance = await env.DIGEST_WORKFLOW.get(run.id);
-    } catch {
-      throw createError;
-    }
-  }
-  instance ??= await env.DIGEST_WORKFLOW.get(run.id);
-  const status = await instance.status();
-  if (
-    status.status === "complete" &&
-    run.slack_channel_id &&
-    run.slack_message_ts
-  ) {
-    await repository.recordDigestDelivery({
-      digestId: run.id,
-      channelId: run.slack_channel_id,
-      messageTs: run.slack_message_ts,
-    });
-    return "completed";
-  }
-  let action: "created" | "running" | "restarted" = created
-    ? "created"
-    : "running";
-  if (["errored", "terminated", "complete"].includes(status.status)) {
-    await instance.restart();
-    action = "restarted";
-  }
-  await repository.attachWorkflow(run.id, instance.id);
-  return action;
 }
 
 export function previousLocalDate(nowMs: number, timezone: string): string {

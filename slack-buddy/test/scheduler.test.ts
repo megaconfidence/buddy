@@ -1,18 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reconcileDigestSchedule, safeWorkflowId } from "../src/scheduler";
-import {
-  getSlackIdentity,
-  ensurePublicChannelMembership,
-} from "../src/slack/api";
+import { getSlackIdentity } from "../src/slack/api";
 import { SlackBuddyRepository } from "../src/storage/repository";
+import { initialDigestJob, slackJobId } from "../src/domain/jobs";
+import { SlackJobRepository } from "../src/storage/jobs";
 import { digestWindowForDate } from "../src/domain/time";
 import type { Env } from "../src/env";
 import { testDatabase } from "./helpers/database";
 import { message, now, window } from "./helpers/fixtures";
 
+vi.mock("agents", () => ({ getAgentByName: vi.fn() }));
+
 vi.mock("../src/slack/api", () => ({
   getSlackIdentity: vi.fn(),
-  ensurePublicChannelMembership: vi.fn(),
 }));
 
 function instance(id: string, status: InstanceStatus["status"] = "queued") {
@@ -59,7 +59,6 @@ beforeEach(() => {
     teamId: "T1",
     botUserId: "UBOT",
   });
-  vi.mocked(ensurePublicChannelMembership).mockResolvedValue([]);
 });
 afterEach(() => {
   database.close();
@@ -98,7 +97,8 @@ describe("scheduled recovery and retention", () => {
       Date.parse("2026-09-09T04:00:00Z"),
     );
     expect(result.action).toBe("before_delivery_time");
-    expect(failed.restart).toHaveBeenCalledOnce();
+    expect(failed.restart).not.toHaveBeenCalled();
+    expect(instances.has(await slackJobId(olderId, 0))).toBe(true);
     expect((await repository.getDigestRun(olderId))?.status).toBe("running");
     expect(await repository.getDigestRun(latestId)).toBeNull();
   });
@@ -117,11 +117,15 @@ describe("scheduled recovery and retention", () => {
       messageTs: "1.000001",
     });
     expect((await reconcileDigestSchedule(env, now)).action).toBe("completed");
-    expect(failed.restart).toHaveBeenCalledOnce();
+    expect(failed.restart).not.toHaveBeenCalled();
+    expect(instances.has(await slackJobId(olderId, 0))).toBe(true);
   });
 
-  it("continues creating today's run when an older workflow cannot recover", async () => {
-    const failed = await failedOlderRun();
+  it("continues creating today's run when an older bounded workflow cannot recover", async () => {
+    await failedOlderRun();
+    const id = await slackJobId(olderId, 0);
+    const failed = instance(id, "errored");
+    instances.set(id, failed);
     failed.restart.mockRejectedValue(new Error("restart unavailable"));
     vi.spyOn(console, "error").mockImplementation(() => {});
     await expect(reconcileDigestSchedule(env, now)).rejects.toThrow(
@@ -131,10 +135,18 @@ describe("scheduled recovery and retention", () => {
   });
 
   it("checks the status even when createBatch returns an existing instance", async () => {
-    const failed = await failedOlderRun();
-    vi.mocked(env.DIGEST_WORKFLOW.createBatch).mockResolvedValue([
-      failed as unknown as WorkflowInstance,
-    ]);
+    await failedOlderRun();
+    const id = await slackJobId(olderId, 0);
+    const failed = instance(id, "errored");
+    instances.set(id, failed);
+    vi.mocked(env.DIGEST_WORKFLOW.createBatch).mockImplementation(
+      async (options) =>
+        options[0]?.id === id
+          ? [failed as unknown as WorkflowInstance]
+          : options.map(
+              ({ id }) => instance(id!) as unknown as WorkflowInstance,
+            ),
+    );
     await reconcileDigestSchedule(env, Date.parse("2026-09-09T04:00:00Z"));
     expect(failed.restart).toHaveBeenCalledOnce();
   });
@@ -152,13 +164,100 @@ describe("scheduled recovery and retention", () => {
     ).toEqual([]);
   });
 
-  it("does not let channel discovery failures prevent workflow creation", async () => {
-    vi.mocked(ensurePublicChannelMembership).mockRejectedValue(
-      new Error("discovery failure"),
+  it("starts one directory chain and makes no bulk Slack requests in cron", async () => {
+    await reconcileDigestSchedule(env, now);
+    await reconcileDigestSchedule(env, now + 3_600_000);
+    expect(
+      database.sqlite
+        .prepare("SELECT * FROM slack_jobs WHERE kind = 'directory'")
+        .all(),
+    ).toHaveLength(1);
+    expect(getSlackIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers the pending successor without rerunning its completed root", async () => {
+    const jobs = new SlackJobRepository(env.DB);
+    await repository.createDigestRun({
+      id: latestId,
+      teamId: "T1",
+      userId: "U1",
+      window,
+    });
+    const root = await jobs.enqueue(
+      initialDigestJob({
+        digestId: latestId,
+        teamId: "T1",
+        userId: "U1",
+        window,
+      }),
     );
-    await expect(reconcileDigestSchedule(env, now)).rejects.toThrow(
-      "maintenance failed",
-    );
-    expect((await repository.getDigestRun(latestId))?.status).toBe("running");
+    const next = await jobs.finish(root.id, {
+      ...root.params,
+      sequence: 1,
+      phase: { kind: "users", cursor: "next" },
+    });
+    await reconcileDigestSchedule(env, now);
+    expect(instances.has(root.id)).toBe(false);
+    expect(instances.has(next!.id)).toBe(true);
+  });
+  it("waits for an active legacy instance before migrating its digest", async () => {
+    const legacy = await failedOlderRun();
+    legacy.status.mockResolvedValue({ status: "running" });
+    await repository.attachWorkflow(olderId, olderId);
+    await reconcileDigestSchedule(env, now);
+    expect(instances.has(await slackJobId(olderId, 0))).toBe(false);
+    expect(instances.has(await slackJobId(latestId, 0))).toBe(true);
+    legacy.status.mockResolvedValue({ status: "errored" });
+    await reconcileDigestSchedule(env, now);
+    expect(instances.has(await slackJobId(olderId, 0))).toBe(true);
+    expect(legacy.restart).not.toHaveBeenCalled();
+  });
+
+  it("queues new digests even with more than one sweep of existing failed runs", async () => {
+    const jobs = new SlackJobRepository(env.DB);
+    for (let index = 0; index < 30; index++) {
+      const date = new Date(
+        Date.parse("2026-07-01T00:00:00Z") + index * 86_400_000,
+      )
+        .toISOString()
+        .slice(0, 10);
+      const id = `backlog-${index}`;
+      const oldWindow = digestWindowForDate(date, "Europe/Paris");
+      await repository.createDigestRun({
+        id,
+        teamId: "T1",
+        userId: "U1",
+        window: oldWindow,
+      });
+      const job = await jobs.enqueue(
+        initialDigestJob({
+          digestId: id,
+          teamId: "T1",
+          userId: "U1",
+          window: oldWindow,
+        }),
+      );
+      await jobs.markFailed(job.id, "service outage");
+    }
+    await reconcileDigestSchedule(env, now);
+    expect(await jobs.get(await slackJobId(latestId, 0))).toBeDefined();
+  });
+  it("does not refresh a fresh directory on every hourly tick", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const jobs = new SlackJobRepository(env.DB);
+    await jobs.recordDirectory("T1", "cached-snapshot");
+    await reconcileDigestSchedule(env, now);
+    await reconcileDigestSchedule(env, now + 3_600_000);
+    expect(
+      database.sqlite
+        .prepare("SELECT * FROM slack_jobs WHERE kind = 'directory'")
+        .all(),
+    ).toHaveLength(0);
+    await reconcileDigestSchedule(env, now + 25 * 3_600_000);
+    expect(
+      database.sqlite
+        .prepare("SELECT * FROM slack_jobs WHERE kind = 'directory'")
+        .all(),
+    ).toHaveLength(1);
   });
 });

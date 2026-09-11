@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { callSlackApi } from "../src/slack/client";
 import {
-  deliverDigest,
-  ensurePublicChannelMembership,
-  reconcileChannelHistory,
-  type HistoryReconciliationPage,
+  deliverDigestPage,
+  ensureChannelMembershipBatch,
+  reconcileHistoryPage,
+  reconcileRepliesPage,
 } from "../src/slack/api";
 import { SlackBuddyRepository } from "../src/storage/repository";
 import type { Env } from "../src/env";
@@ -47,10 +47,11 @@ describe("Slack API validation and recovery", () => {
   it("rejects HTTP-200 Slack errors rather than checkpointing empty history", async () => {
     mockSlack(() => ({ ok: false, error: "missing_scope" }));
     await expect(
-      reconcileChannelHistory({
+      reconcileHistoryPage({
         env,
         teamId: "T1",
-        channel: { id: "C1" },
+        channelId: "C1",
+        cursor: null,
         startMs: window.startMs,
         endMs: window.endMs,
       }),
@@ -64,7 +65,11 @@ describe("Slack API validation and recovery", () => {
         ? { ok: true, channels: [{ id: "C1", is_member: false }] }
         : { ok: false, error: "restricted_action" },
     );
-    expect(await ensurePublicChannelMembership(env, "T1")).toEqual([]);
+    expect(
+      await ensureChannelMembershipBatch(env, "T1", [
+        { id: "C1", is_member: false },
+      ]),
+    ).toEqual([]);
     expect(
       database.sqlite.prepare("SELECT * FROM slack_channels").all(),
     ).toEqual([]);
@@ -180,13 +185,26 @@ describe("Slack API validation and recovery", () => {
         ],
       };
     });
-    await reconcileChannelHistory({
-      env,
-      teamId: "T1",
-      channel: { id: "C1" },
-      startMs: window.startMs,
-      endMs: window.endMs,
-    });
+    let cursor: string | null = null;
+    do {
+      const page = await reconcileHistoryPage({
+        env,
+        teamId: "T1",
+        channelId: "C1",
+        startMs: window.startMs,
+        endMs: window.endMs,
+        cursor,
+      });
+      for (const thread of page.threads)
+        await reconcileRepliesPage({
+          env,
+          teamId: "T1",
+          ...thread,
+          endMs: window.endMs,
+          cursor: null,
+        });
+      cursor = page.nextCursor;
+    } while (cursor);
     const messages = await new SlackBuddyRepository(env.DB).loadMessages(
       "T1",
       window.startMs,
@@ -246,9 +264,9 @@ describe("Slack API validation and recovery", () => {
       existingChannelId: null,
       existingMessageTs: null,
     };
-    await expect(deliverDigest(input)).rejects.toThrow("500");
+    await expect(deliverAllPages(input)).rejects.toThrow("500");
     expect(sent).toHaveLength(1);
-    await expect(deliverDigest(input)).resolves.toEqual({
+    await expect(deliverAllPages(input)).resolves.toEqual({
       channelId: "D1",
       messageTs: "1.000001",
     });
@@ -262,53 +280,37 @@ describe("Slack API validation and recovery", () => {
       request.mock.calls.filter(([url]) => String(url).endsWith("chat.update")),
     ).toHaveLength(1);
   });
-
-  it("resumes history scans from checkpointed pages without storing raw text in checkpoints", async () => {
-    let fail = true;
-    let firstPageRequests = 0;
-    mockSlack((_method, body) => {
-      if (!body.get("cursor")) {
-        firstPageRequests += 1;
-        return {
-          ok: true,
-          messages: [
-            { ts: timestamp(window.startMs + 1_000), text: "Source text" },
-          ],
-          response_metadata: { next_cursor: "second" },
-        };
-      }
-      if (fail) {
-        fail = false;
-        return { ok: false, error: "internal_error" };
-      }
-      return { ok: true, messages: [] };
-    });
-    const pages = new Map<string, HistoryReconciliationPage>();
-    const input = {
-      env,
-      teamId: "T1",
-      channel: { id: "C1" },
-      startMs: window.startMs,
-      endMs: window.endMs,
-      checkpoint: async (
-        name: string,
-        work: () => Promise<HistoryReconciliationPage>,
-      ) => {
-        const saved = pages.get(name);
-        if (saved) return saved;
-        const result = await work();
-        pages.set(name, structuredClone(result));
-        return result;
-      },
-    };
-    await expect(reconcileChannelHistory(input)).rejects.toThrow(
-      "internal_error",
-    );
-    expect([...pages.keys()]).toEqual(["reconcile C1 page 1"]);
-    expect(JSON.stringify([...pages.values()])).not.toContain("Source text");
-    await expect(reconcileChannelHistory(input)).resolves.toMatchObject({
-      messageCount: 1,
-    });
-    expect(firstPageRequests).toBe(1);
-  });
 });
+
+// Test harness only: production executes each page in a distinct Workflow.
+async function deliverAllPages(input: {
+  env: Env;
+  digestId: string;
+  teamId: string;
+  window: typeof window;
+  digest: ReturnType<typeof digest>;
+}) {
+  let channelId: string | null = null;
+  let firstTs: string | null = null;
+  for (
+    let page = 0;
+    page < Math.max(1, Math.ceil(input.digest.items.length / 15));
+    page++
+  ) {
+    let cursor: string | null = null;
+    do {
+      const result = await deliverDigestPage({
+        ...input,
+        page,
+        channelId,
+        cursor,
+        existingMessageTs: null,
+        beforeWrite: async () => {},
+      });
+      channelId = result.channelId;
+      cursor = result.nextCursor;
+      if (page === 0 && result.messageTs) firstTs = result.messageTs;
+    } while (cursor);
+  }
+  return { channelId, messageTs: firstTs };
+}
