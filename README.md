@@ -4,8 +4,8 @@ This repository contains focused assistants built under the Buddy name.
 
 ## Workspaces
 
-- [`slack-buddy`](./slack-buddy) — personalized Slack assistant for developer
-  advocacy. This contains the application built so far.
+- [`slack-buddy`](./slack-buddy) — private DevRel briefing and research web
+  app powered by the Mistral Slack MCP connector.
 - [`changelog-buddy`](./changelog-buddy) — monitors public Mistral release
   sources and emails a daily developer and content-opportunity briefing.
 
@@ -43,4 +43,5 @@ npm run deploy:dry-run:changelog
 ```
 
 Workspace-specific setup and deployment instructions are in
-[`slack-buddy/README.md`](./slack-buddy/README.md).
+[`slack-buddy/README.md`](./slack-buddy/README.md) and
+[`changelog-buddy/README.md`](./changelog-buddy/README.md).

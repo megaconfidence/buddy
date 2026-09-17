@@ -1,41 +1,42 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "slack-buddy",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-09-05",
-  "compatibility_flags": ["nodejs_compat"],
-  "vars": {
-    "SLACK_BUDDY_SCHEDULED_MCP_ENABLED": "false",
-    "MISTRAL_MODEL": "zai-glm-5-2",
-  },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "slack-buddy-db",
-      "database_id": "2ed53116-12cc-4ff9-a245-62ec7b3ff152",
-      "migrations_dir": "migrations",
-    },
-  ],
-  // Deployment history only. The MCP app has no Durable Object bindings.
-  // v2 retires these namespaces and deletes their stored data on deployment.
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["SlackBuddyAgent", "ChatStateDO"],
-    },
-    {
-      "tag": "v2-mcp-only",
-      "deleted_classes": ["SlackBuddyAgent", "ChatStateDO"],
-    },
-  ],
-  "triggers": {
-    "crons": ["0 * * * *"],
-  },
-  "limits": { "cpu_ms": 30000, "subrequests": 10000 },
-  "observability": {
-    "enabled": true,
-    "traces": {
-      "enabled": true,
-    },
-  },
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "slack-buddy",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-09-15",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+
+	/**
+	 * MISTRAL_API_KEY is a secret, not a var. It authenticates both the MCP
+	 * gateway and the model.
+	 *   production: wrangler secret put MISTRAL_API_KEY
+	 *   local:      .dev.vars
+	 */
+	"vars": {
+		"MCP_GATEWAY_URL": "https://api.mistral.ai/v1/connectors-gateway/slack/mcp",
+		"OWNER_SLACK_USER_ID": "U0BUM44636U",
+		"OWNER_DM_CHANNEL_ID": "D0BTQQF7WCW",
+		"OWNER_TIMEZONE": "Europe/London",
+		"MODEL_BASE_URL": "https://api.mistral.ai/v1",
+		"MODEL_ID": "glm-5-2"
+	},
+
+	// Re-anchors the Durable Object and its poll alarm after a deploy or
+	// eviction. The alarm itself drives the actual poll cadence.
+	"triggers": {
+		"crons": ["*/15 * * * *"]
+	},
+
+	"durable_objects": {
+		"bindings": [{ "name": "SlackBuddy", "class_name": "SlackBuddy" }]
+	},
+
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["SlackBuddy"] }]
 }
