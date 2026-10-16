@@ -42,7 +42,13 @@ export type DigestItem = {
 };
 
 /** Per-stage counts, so an empty briefing says which stage produced nothing. */
-export type DigestStats = { retrieved: number; candidates: number; surfaced: number };
+export type DigestStats = {
+	retrieved: number;
+	/** Hits dropped because the owner had already engaged with them. */
+	engaged: number;
+	candidates: number;
+	surfaced: number;
+};
 
 export type DigestResult =
 	| { status: "empty"; items: []; stats: DigestStats }
@@ -123,6 +129,57 @@ export function buildQueryPlan(opts: {
 }
 
 const itemKey = (hit: SearchHit) => `${hit.channelId ?? "?"}:${hit.ts}`;
+
+/**
+ * The thread a hit belongs to, as `channel:root_ts`.
+ *
+ * Search results carry no thread field; the permalink's `thread_ts` is the
+ * only place it appears. A message that starts no thread is its own root.
+ */
+export function threadKey(hit: SearchHit): string {
+	let root = hit.ts;
+	if (hit.permalink) {
+		try {
+			root = new URL(hit.permalink).searchParams.get("thread_ts") ?? hit.ts;
+		} catch {
+			// keep the message's own ts
+		}
+	}
+	return `${hit.channelId ?? "?"}:${root}`;
+}
+
+/** The owner's latest post per thread, keyed by `threadKey`. */
+export function lastOwnerPosts(
+	hits: SearchHit[],
+	ownerId: string,
+): Map<string, number> {
+	const out = new Map<string, number>();
+	for (const hit of hits) {
+		if (hit.authorId !== ownerId) continue;
+		const key = threadKey(hit);
+		const ts = Number(hit.ts);
+		if (ts > (out.get(key) ?? 0)) out.set(key, ts);
+	}
+	return out;
+}
+
+/**
+ * Whether the owner has evidently already read a hit.
+ *
+ * The gateway exposes no Slack read state, so engagement stands in for it:
+ * the owner wrote the message, or posted in its thread at or after it.
+ * Replies that arrive after the owner's last post in a thread are kept,
+ * because the owner has not been there since.
+ */
+export function isEngaged(
+	hit: SearchHit,
+	ownerId: string,
+	ownerPosts: Map<string, number>,
+): boolean {
+	if (hit.authorId === ownerId) return true;
+	const last = ownerPosts.get(threadKey(hit));
+	return last !== undefined && last >= Number(hit.ts);
+}
 
 const DigestSchema = z.object({
 	items: z
@@ -210,10 +267,37 @@ export async function runDigest(opts: {
 		}
 	}
 
+	// The owner's own posts in the window, to drop threads they have already
+	// been in. Posts before the window cannot postdate any hit, so the window
+	// is exactly what is needed. One page is 20 posts; on a busier day the
+	// oldest are missed, which lets an already-read item through but never
+	// hides an unread one.
+	let ownerPosts = new Map<string, number>();
+	try {
+		ownerPosts = lastOwnerPosts(
+			await opts.client.searchJoined({
+				keywords: [],
+				filters: `from:<@${opts.ownerId}>`,
+				after,
+				limit: 20,
+				includeContext: false,
+			}),
+			opts.ownerId,
+		);
+	} catch {
+		// Degrades to surfacing threads the owner already answered.
+	}
+
+	let engaged = 0;
 	const candidates = [...collected.entries()]
 		.filter(
 			([key, { hit }]) => !opts.store.hasSeen(key) && !opts.store.isSent(hit.ts),
 		)
+		.filter(([, { hit }]) => {
+			if (!isEngaged(hit, opts.ownerId, ownerPosts)) return true;
+			engaged++;
+			return false;
+		})
 		.filter(([, { hit }]) => permalinkMatches(hit.permalink, hit.channelId, hit.ts))
 		.sort(([aKey, a], [bKey, b]) => {
 			const aM = mentionKeys.has(aKey) ? 0 : 1;
@@ -223,6 +307,7 @@ export async function runDigest(opts: {
 
 	const stats: DigestStats = {
 		retrieved: collected.size,
+		engaged,
 		candidates: candidates.length,
 		surfaced: 0,
 	};

@@ -317,6 +317,13 @@ run consume the next one's window — a manual test at 22:37 left the 08:30 brie
 7 messages instead of 63. `seen_items` is what prevents repeats, so the window only has
 to be wide enough, not exact.
 
+**Already-read messages are approximated by engagement.** The gateway exposes no Slack
+read state: no `last_read`, and search ignores `is:unread`. The sweep therefore drops
+hits the owner wrote, and hits in a thread where the owner posted at or after them,
+found with one extra `from:<@owner>` search over the same window. Replies that arrive
+after the owner's last post in a thread are kept. Messages read without replying cannot
+be detected. The drop count is recorded as `engaged=` in `digest_runs.note`.
+
 ## State
 
 All state lives in the agent's Durable Object SQLite. The Workflow reads and writes it

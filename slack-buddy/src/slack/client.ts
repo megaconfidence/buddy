@@ -120,6 +120,8 @@ export class SlackClient {
 	 */
 	async searchJoined(opts: {
 		keywords: string[];
+		/** Slack search modifiers, e.g. `from:<@U123>`. */
+		filters?: string;
 		naturalLanguageQuery?: string;
 		after?: string;
 		before?: string;
@@ -131,6 +133,7 @@ export class SlackClient {
 			{
 				query: opts.keywords.join(" "),
 				keywords: opts.keywords,
+				...(opts.filters ? { filters: opts.filters } : {}),
 				natural_language_query: opts.naturalLanguageQuery ?? "",
 				only_my_channels: true,
 				channel_types: "public_channel,private_channel",

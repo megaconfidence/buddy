@@ -686,7 +686,7 @@ export class SlackBuddy extends Think<Env> {
 
 			// Per-stage counts, so "empty" says whether retrieval or triage
 			// produced nothing. Without this an empty briefing is unreadable.
-			const note = `retrieved=${result.stats.retrieved} candidates=${result.stats.candidates} surfaced=${result.stats.surfaced}`;
+			const note = `retrieved=${result.stats.retrieved} engaged=${result.stats.engaged} candidates=${result.stats.candidates} surfaced=${result.stats.surfaced}`;
 
 			if (result.status === "empty") {
 				// Say so rather than staying silent. Silence is indistinguishable
