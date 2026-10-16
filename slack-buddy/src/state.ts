@@ -13,6 +13,11 @@ export type Sql = <T = Record<string, string | number | boolean | null>>(
 export const TOP_LEVEL_CURSOR = "toplevel";
 export const LAST_ACTIVITY = "last_activity_at";
 export const LAST_DIGEST = "last_digest_at";
+export const LAST_MANUAL_BRIEFING = "last_manual_briefing_at";
+/** Epoch ms until which upstream rate limiting is assumed to persist. */
+export const RATE_LIMITED_UNTIL = "rate_limited_until";
+/** Epoch ms until which the primary model is assumed unavailable. */
+export const MODEL_FALLBACK_UNTIL = "model_fallback_until";
 
 /**
  * Opaque `Thread: N replies (latest: ...)` value, used only to detect change.
@@ -136,6 +141,11 @@ export class Store {
 		return this.sql<{ key: string }>`
 			SELECT key FROM seen_items WHERE key = ${key} LIMIT 1
 		`.length > 0;
+	}
+
+	/** Maintenance: forget what has been briefed, so items can resurface. */
+	clearSeen(): void {
+		this.sql`DELETE FROM seen_items`;
 	}
 
 	markSeen(keys: string[], now = Date.now()): void {

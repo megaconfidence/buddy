@@ -25,7 +25,8 @@
 		"OWNER_DM_CHANNEL_ID": "D0BTQQF7WCW",
 		"OWNER_TIMEZONE": "Europe/London",
 		"MODEL_BASE_URL": "https://api.mistral.ai/v1",
-		"MODEL_ID": "glm-5-2"
+		"MODEL_ID": "glm-5-2",
+		"MODEL_FALLBACK_ID": "mistral-medium-latest"
 	},
 
 	// Re-anchors the Durable Object and its poll alarm after a deploy or

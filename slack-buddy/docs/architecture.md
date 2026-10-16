@@ -195,13 +195,21 @@ Slack requires a 200 within three seconds.)
 
 | Condition | Interval |
 | --- | --- |
-| Working hours, Mon–Fri 08:00–19:00 Europe/London | 60 s |
-| Overnight and weekends | 15 min |
-| Within 10 min of a message from you | 10 s |
-| Within 20 min of digest delivery | 10 s |
+| Working hours, Mon–Fri 08:00–19:00 Europe/London | 10 s |
+| Overnight and weekends | 30 s |
+| Within 15 min of a message from you | 2 s |
+| Within 20 min of digest delivery | 2 s |
 
-Roughly 950 MCP calls a day, against 8,640 for a flat 10 s poll — and more responsive
-than a flat 60 s poll at the moments that matter.
+Roughly 5,600 requests a day against a free-plan allowance of 100,000, and about 8% of
+the monthly Durable Object duration. Cloudflare is not the constraint here; the
+gateway's own rate limiting is the practical ceiling.
+
+**The cadence is not what makes a reply slow.** A poll costs ~1.6 s and the full
+pipeline — read, react, model turn, send — is ~7 s, so latency is `poll wait + ~7 s`.
+Going from 10 s to 2 s takes a reply from ~12 s to ~8 s; going below 2 s saves under a
+second and polls would start to overlap. The model turn is the floor. Push delivery via
+a Slack app would remove the poll wait entirely and still land at ~7 s, so it is not a
+fix for latency either.
 
 **Active threads cost nothing to watch.** Your replies land inside a thread, which the
 top-level read does not expand — but it does annotate the parent with
@@ -289,11 +297,25 @@ Two details that matter:
 `im,mpim` default. DMs and group DMs stay out of the sweep and therefore out of model
 context.
 
-**Quiet days are silent.** If the sweep surfaces nothing, nothing is posted. The cost is
-that silence is ambiguous between a quiet day and a failed run, so every run — including
-empty and failed ones — is recorded in `digest_runs`, and the agent can report its own
-run history when asked in the DM. That makes the ambiguity resolvable rather than
-invisible.
+**Quiet days get one line**, not silence:
+
+```
+Daily briefing — nothing worth surfacing.
+Scanned 7 messages since Thu 22:37.
+```
+
+Silence was the original choice and it failed in practice: a correct, on-time, empty run
+read as a broken agent, because from the DM there is no difference between the two. The
+counts also make the run self-explaining — whether the window was thin or the triage was
+strict is visible without opening the run ledger.
+
+Every run is still recorded in `digest_runs` regardless of outcome, and the agent can
+report its own run history when asked.
+
+**The window has an 18-hour floor.** Anchoring `since` purely on the previous run let any
+run consume the next one's window — a manual test at 22:37 left the 08:30 briefing with
+7 messages instead of 63. `seen_items` is what prevents repeats, so the window only has
+to be wide enough, not exact.
 
 ## State
 
@@ -355,6 +377,83 @@ records every agent-sent timestamp.
 
 Two test messages remain in the self-DM. The gateway exposes no delete tool, so they
 have to be removed by hand.
+
+## Operations
+
+`/health` reports MCP connection state, how many of the 12 tools were discovered,
+armed schedules, cursors and recent run outcomes. Two query flags force work that would
+otherwise wait for an alarm:
+
+| Flag | Effect |
+| --- | --- |
+| `?reconnect=1` | Drop and re-add the MCP registration. `onStart` only runs on a cold start, so a warm object otherwise keeps a broken connection until eviction. |
+| `?poll=1` | Run a poll immediately instead of waiting for the armed alarm. |
+| `?digest=1[&hours=N]` | Run the sweep now, optionally overriding the lookback window. |
+| `?reset=seen` | Forget what has been briefed, so items can resurface. |
+
+Every run records `retrieved=… candidates=… surfaced=…` in `digest_runs.note`, so an
+empty briefing says which stage produced nothing. Without those counts "empty" is
+unreadable — it could equally mean a quiet day, a broken search, or a triage that
+rejected everything.
+
+These endpoints are unauthenticated. They only touch the owner's own DM and cannot leak
+data, but anyone who learns the URL can trigger a poll or a sweep. Add a shared secret
+before relying on this unattended.
+
+### Failure modes found in production
+
+Three bugs survived design review and only appeared once deployed. All are fixed; they
+are recorded because each was invisible from the outside.
+
+**The tool policy bricked every turn.** `getTools()` threw unless all 12 Slack tools
+were present, but Think's `waitForMcpConnections` defaults to `false`, so the first turn
+after any cold start saw an empty catalog. Filtering to the allowlist is the security
+control; a partial catalog is a readiness signal and is now reported, not thrown.
+
+**A stuck MCP registration could not heal.** `addMcpServer` is idempotent on name+URL
+and returns an existing row without redriving it, and the SDK only runs discovery when
+connect reports `connected`. A registration left at `connecting` therefore stayed there
+across every restart, with `error: null` and no log. `connectSlack()` now drops any
+non-ready registration before re-adding, and the poller repairs a dropped connection on
+its next tick.
+
+**The cron could defer the poll indefinitely.** The 15-minute cron called `armNextPoll`,
+which cancelled the pending poll and re-armed it a full interval out. At idle cadence
+the two intervals match, so each tick pushed the poll further away while `/health` still
+showed an armed alarm.
+
+**The fix for that then killed the alarm chain.** Keeping "whichever poll fires soonest"
+looked right, but `pollInbox` re-arms from its own `finally`, while its schedule row
+still exists. That row read as a poll already scheduled sooner, so no new poll was
+armed; the SDK then deleted the row and the chain stopped after exactly one tick. The
+agent polled only when something external called `armNextPoll`, which during debugging
+was masked by repeated `/health` calls appearing to work.
+
+Both cases turn on liveness, which is now the rule in `choosePollSchedule()`: a row at
+or before now is the alarm currently executing or one that was missed, and can never
+block re-arming; a row strictly in the future is a real pending poll and is never pushed
+back. The decision is a pure function so it can be tested without a live Durable Object,
+which is what the original change lacked.
+
+**The schema was silently discarded.** `@ai-sdk/openai-compatible` defaults
+`supportsStructuredOutputs` to false and drops the JSON schema with only a warning, so
+`generateObject` received whatever shape the model chose and failed validation on every
+run. Setting the flag on the provider fixes it.
+
+**A bad triage run burned a day of candidates.** Every retrieved item was marked seen
+whether or not it was briefed, so one failed or over-strict triage permanently buried
+that day's material. Only surfaced items are marked now; rejected ones are cheap to
+reconsider and usually fall outside the next window anyway.
+
+**Untruncated context degraded triage.** `include_context: true` appends surrounding
+messages to every hit, and 63 untruncated candidates produced a prompt that returned
+zero items where a truncated one returned four. Sources are capped at 700 characters.
+A 1M-token context means input *fits*, not that the model reasons well over it.
+
+**Replies were invisible.** Conversational replies were posted as thread replies, which
+Slack does not surface in the main DM pane — and because the agent posts under the
+owner's own account, no notification is raised either. The agent looked dead while
+answering every message. Conversational replies now set `reply_broadcast`.
 
 ## Known tradeoffs
 

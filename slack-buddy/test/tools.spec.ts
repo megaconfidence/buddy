@@ -4,7 +4,6 @@ import {
 	READ_ONLY_ALLOWLIST,
 	READ_ONLY_TOOLS,
 	WRITE_TOOLS,
-	ToolPolicyError,
 	applyToolPolicy,
 } from "../src/slack/tools";
 
@@ -26,19 +25,20 @@ const fullCatalog = () => toolSetFrom([...READ_ONLY_TOOLS, ...WRITE_TOOLS].map(n
 
 describe("applyToolPolicy", () => {
 	it("reduces the full 19-tool catalog to the 12 read-only tools", () => {
-		const allowed = applyToolPolicy(fullCatalog());
+		const { tools, missing } = applyToolPolicy(fullCatalog());
 
-		expect(Object.keys(allowed)).toHaveLength(12);
+		expect(Object.keys(tools)).toHaveLength(12);
+		expect(missing).toEqual([]);
 		expect(READ_ONLY_ALLOWLIST.size).toBe(12);
 	});
 
 	it("never lets a write tool through", () => {
-		const allowed = applyToolPolicy(fullCatalog());
+		const { tools } = applyToolPolicy(fullCatalog());
 
 		for (const write of WRITE_TOOLS) {
-			expect(allowed).not.toHaveProperty(ns(write));
+			expect(tools).not.toHaveProperty(ns(write));
 		}
-		expect(allowed).not.toHaveProperty(ns("slack_send_message"));
+		expect(tools).not.toHaveProperty(ns("slack_send_message"));
 	});
 
 	it("matches namespaced keys, not raw gateway tool names", () => {
@@ -48,9 +48,21 @@ describe("applyToolPolicy", () => {
 		expect(READ_ONLY_ALLOWLIST.has("tool_slack_slack_read_channel")).toBe(true);
 	});
 
-	it("fails closed when the catalog is short", () => {
+	it("degrades instead of throwing when discovery has not finished", () => {
+		// MCP connections are restored asynchronously, so a partial catalog is
+		// normal on a cold start. Treating it as fatal bricked every turn in
+		// the first deployment; this is the regression test for that.
 		const partial = toolSetFrom(READ_ONLY_TOOLS.slice(0, 5).map(ns));
-		expect(() => applyToolPolicy(partial)).toThrow(ToolPolicyError);
+		const { tools, missing } = applyToolPolicy(partial);
+
+		expect(Object.keys(tools)).toHaveLength(5);
+		expect(missing).toHaveLength(7);
+	});
+
+	it("reports an empty catalog as fully missing, not as an error", () => {
+		const { tools, missing } = applyToolPolicy({});
+		expect(Object.keys(tools)).toHaveLength(0);
+		expect(missing).toHaveLength(12);
 	});
 
 	it("ignores unknown tools rather than adopting them", () => {
@@ -58,10 +70,10 @@ describe("applyToolPolicy", () => {
 			...fullCatalog(),
 			...toolSetFrom([ns("slack_some_future_tool")]),
 		};
-		const allowed = applyToolPolicy(catalog);
+		const { tools } = applyToolPolicy(catalog);
 
-		expect(Object.keys(allowed)).toHaveLength(12);
-		expect(allowed).not.toHaveProperty(ns("slack_some_future_tool"));
+		expect(Object.keys(tools)).toHaveLength(12);
+		expect(tools).not.toHaveProperty(ns("slack_some_future_tool"));
 	});
 
 	it("keeps read and write sets disjoint and complete", () => {

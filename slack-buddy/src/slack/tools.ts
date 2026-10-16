@@ -51,38 +51,52 @@ const FORBIDDEN: ReadonlySet<string> = new Set(WRITE_TOOLS.map(namespace));
 
 export class ToolPolicyError extends Error {}
 
+export type ToolPolicyResult = {
+	/** Tools safe to hand to the model. Never contains a write tool. */
+	tools: ToolSet;
+	/**
+	 * Allowlisted tools absent from the catalog.
+	 *
+	 * Non-empty usually means MCP discovery has not finished yet, not that
+	 * anything is wrong. It is a readiness signal, not a policy violation.
+	 */
+	missing: string[];
+};
+
 /**
  * Reduce a full MCP tool set to the allowlist.
  *
  * Think's `includeMcpTools` defaults to true and would otherwise merge every
  * connected tool into the model turn. The agent disables that and routes tools
  * through here instead, so this function is the enforcement point for the
- * whole design. It fails closed: an unexpected catalog aborts rather than
- * silently widening what the model can reach.
+ * whole design.
+ *
+ * Filtering is the security control: only names on the allowlist are ever
+ * returned, so a partial catalog can only ever yield fewer capabilities, never
+ * more. Missing tools are therefore reported rather than thrown — an earlier
+ * version treated them as fatal, which bricked every turn whenever MCP
+ * discovery had not yet completed.
  */
-export function applyToolPolicy(all: ToolSet): ToolSet {
+export function applyToolPolicy(all: ToolSet): ToolPolicyResult {
 	// The input is the full gateway catalog, write tools included. That is
 	// expected; the point of this function is to not pass them on.
-	const allowed: ToolSet = {};
+	const tools: ToolSet = {};
 	for (const [name, tool] of Object.entries(all)) {
-		if (READ_ONLY_ALLOWLIST.has(name)) allowed[name] = tool;
+		if (READ_ONLY_ALLOWLIST.has(name)) tools[name] = tool;
 	}
 
 	// Defence in depth: only reachable if the allowlist and the write list
 	// ever overlap, which would make the filter above a no-op for that tool.
-	const leaked = Object.keys(allowed).filter((n) => FORBIDDEN.has(n));
+	// That is a genuine policy failure and must stop the turn.
+	const leaked = Object.keys(tools).filter((n) => FORBIDDEN.has(n));
 	if (leaked.length > 0) {
 		throw new ToolPolicyError(
 			`Write-capable tools reached the model tool set: ${leaked.join(", ")}`,
 		);
 	}
 
-	const missing = [...READ_ONLY_ALLOWLIST].filter((n) => !(n in allowed));
-	if (missing.length > 0) {
-		throw new ToolPolicyError(
-			`Expected ${READ_ONLY_ALLOWLIST.size} read-only tools, missing: ${missing.join(", ")}`,
-		);
-	}
-
-	return allowed;
+	return {
+		tools,
+		missing: [...READ_ONLY_ALLOWLIST].filter((n) => !(n in tools)),
+	};
 }

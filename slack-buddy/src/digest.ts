@@ -41,9 +41,22 @@ export type DigestItem = {
 	channel: string;
 };
 
+/** Per-stage counts, so an empty briefing says which stage produced nothing. */
+export type DigestStats = { retrieved: number; candidates: number; surfaced: number };
+
 export type DigestResult =
-	| { status: "empty"; items: [] }
-	| { status: "ok"; items: DigestItem[] };
+	| { status: "empty"; items: []; stats: DigestStats }
+	| { status: "ok"; items: DigestItem[]; stats: DigestStats };
+
+/**
+ * Cap per-source text handed to the model.
+ *
+ * `include_context: true` appends surrounding messages to every hit, so 46
+ * untruncated candidates produce a prompt large enough to degrade triage. The
+ * model has a 1M context, but "fits" and "reasons well over" are different
+ * limits.
+ */
+const MAX_SOURCE_CHARS = 700;
 
 export type Signal = { term: string; positive: number; negative: number };
 
@@ -140,9 +153,18 @@ Assign each worthwhile message to one section:
 - content: a hook for a blog, talk, demo or cookbook the owner could produce
 - radar: broader DevRel context worth knowing
 
-Judge relevance to a developer advocate. Most retrieved messages are keyword-match
-noise and should be dropped. Returning few items, or none, is correct and is
-preferred over padding. Never output a URL; cite only sourceId.`;
+Surface anything a developer advocate would want to know about:
+- a Mistral product or feature shipping, changing, slipping, or being planned
+- someone asking the team for help with docs, demos, talks, launches or examples
+- notable user or customer feedback on a Mistral product
+- a concrete hook for a blog, talk, demo or cookbook
+
+Drop pure chatter, scheduling, billing and account logistics, and duplicates of
+something already covered in this set.
+
+When a message is plausibly relevant, include it and mark confidence "inferred"
+rather than dropping it. Missing a feature rollout matters more than one extra
+line the owner can skim past. Never output a URL; cite only sourceId.`;
 
 export async function runDigest(opts: {
 	client: SlackClient;
@@ -199,7 +221,13 @@ export async function runDigest(opts: {
 			return aM !== bM ? aM - bM : Number(b.hit.ts) - Number(a.hit.ts);
 		});
 
-	if (candidates.length === 0) return { status: "empty", items: [] };
+	const stats: DigestStats = {
+		retrieved: collected.size,
+		candidates: candidates.length,
+		surfaced: 0,
+	};
+
+	if (candidates.length === 0) return { status: "empty", items: [], stats };
 
 	const bySourceId = new Map<string, { hit: SearchHit; term: string }>();
 	const rendered = candidates.map(([key, entry], i) => {
@@ -211,7 +239,7 @@ export async function runDigest(opts: {
 			`CHANNEL: ${entry.hit.channelName ?? entry.hit.channelId ?? "unknown"}`,
 			`AUTHOR: ${entry.hit.authorName ?? entry.hit.authorId ?? "unknown"}`,
 			`TIME: ${entry.hit.time ?? "unknown"}`,
-			`TEXT: ${entry.hit.text}`,
+			`TEXT: ${entry.hit.text.slice(0, MAX_SOURCE_CHARS)}`,
 		].join("\n");
 	});
 
@@ -240,13 +268,18 @@ export async function runDigest(opts: {
 		});
 	}
 
-	// Everything retrieved is marked seen, including what was dropped, so the
-	// same noise is not reconsidered tomorrow.
-	opts.store.markSeen(candidates.map(([key]) => key));
+	// Mark only what was actually briefed.
+	//
+	// Marking every candidate meant a single bad triage run — a prompt too
+	// large, a model hiccup — silently burned a whole day of candidates, which
+	// could never be surfaced again. Rejected items are cheap to reconsider and
+	// mostly fall outside the next run's `after` window anyway.
+	opts.store.markSeen(items.map((i) => i.sourceKey));
+	stats.surfaced = items.length;
 
 	return items.length === 0
-		? { status: "empty", items: [] }
-		: { status: "ok", items };
+		? { status: "empty", items: [], stats }
+		: { status: "ok", items, stats };
 }
 
 export function renderItem(item: DigestItem): string {

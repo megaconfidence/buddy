@@ -168,11 +168,20 @@ export class SlackClient {
 		channelId: string;
 		text: string;
 		threadTs?: string;
+		/**
+		 * Mirror a threaded reply into the main conversation.
+		 *
+		 * Without this a reply is only visible inside the thread. Because the
+		 * agent posts under the owner's own account, Slack raises no
+		 * notification either, so the conversation looks dead from the DM view.
+		 */
+		replyBroadcast?: boolean;
 	}): Promise<{ ts: string; permalink: string | null }> {
 		const raw = await this.call("slack_send_message", {
 			channel_id: opts.channelId,
 			message: opts.text,
 			...(opts.threadTs ? { thread_ts: opts.threadTs } : {}),
+			...(opts.replyBroadcast ? { reply_broadcast: true } : {}),
 		});
 
 		let ts: string | undefined;
