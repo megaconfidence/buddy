@@ -31,6 +31,13 @@ export const LAST_BRIEFING_RUN = "last_briefing_run";
 export const LAST_BRIEFING_TS = "last_briefing_ts";
 /** Slack workspace host learned from search permalinks, for building links. */
 export const WORKSPACE_HOST = "workspace_host";
+/** Epoch ms when the Slack connection was first seen not ready; absent while it is. */
+export const SLACK_DOWN_SINCE = "slack_down_since";
+/** Epoch ms of the last reconnect attempt, and how many since the outage began. */
+export const SLACK_RECONNECT_AT = "slack_reconnect_at";
+export const SLACK_RECONNECT_ATTEMPTS = "slack_reconnect_attempts";
+/** JSON `MissedBriefing`: a briefing that did not go out and still needs catching up. */
+export const MISSED_BRIEFING = "missed_briefing";
 
 /**
  * Opaque `Thread: N replies (latest: ...)` value, used only to detect change.
@@ -173,6 +180,10 @@ export class Store {
 			VALUES (${surface}, ${value}, ${now})
 			ON CONFLICT(surface) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
 		`;
+	}
+
+	deleteCursor(surface: string): void {
+		this.sql`DELETE FROM cursors WHERE surface = ${surface}`;
 	}
 
 	workspaceHost(): string | null {

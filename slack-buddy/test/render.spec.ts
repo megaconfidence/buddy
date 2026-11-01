@@ -3,8 +3,10 @@ import { MAX_ITEMS } from "../src/digest/editorial";
 import {
 	MESSAGE_BUDGET,
 	briefingTitle,
+	catchUpNote,
 	fitBriefing,
 	renderBriefing,
+	renderFailure,
 	renderQuiet,
 } from "../src/digest/render";
 import { SECTIONS, emptyStats, type Briefing, type BriefingItem, type BriefingSource, type Section } from "../src/digest/types";
@@ -193,6 +195,34 @@ describe("renderQuiet", () => {
 
 	it("distinguishes an empty window from an uneventful one", () => {
 		expect(renderQuiet({ ...ctx, stats: emptyStats() })).toContain("No new messages in your channels since Wed 14:30.");
+	});
+});
+
+describe("renderFailure", () => {
+	const base = { title: "Morning briefing", now: NOW, timeZone: TZ, reason: "the model call failed" };
+
+	it("says what failed and when it will try again, in the owner's time", () => {
+		// 08:30 BST plus 30 minutes.
+		const text = renderFailure({ ...base, retryAt: new Date(NOW.getTime() + 30 * 60_000), repeated: false });
+		expect(text).toMatch(/^\*\*Morning briefing · Thu 17 Sept?\*\* didn't go out: the model call failed\. I'll try again at 09:00\.$/);
+	});
+
+	it("hands over to tomorrow once retries are used up", () => {
+		const text = renderFailure({ ...base, retryAt: null, repeated: true });
+		expect(text).toContain("still didn't go out: the model call failed.");
+		expect(text).toContain(`Tomorrow's briefing will cover today too, or reply "briefing" to try now.`);
+	});
+});
+
+describe("catch-up note", () => {
+	const missed = { firstFailedAt: Date.UTC(2026, 8, 16, 7, 30), reason: "Slack couldn't be reached" };
+
+	it("explains a catch-up under the title", () => {
+		const note = catchUpNote(missed, NOW, TZ);
+		expect(note).toBe("Catching up: briefings haven't gone out since Wed 08:30 (Slack couldn't be reached).");
+		const text = renderBriefing(typical, { ...ctx, note });
+		expect(text.split("\n\n")[1]).toBe(`_${note}_`);
+		expect(renderQuiet({ ...ctx, note })).toContain(`\n_${note}_\n`);
 	});
 });
 

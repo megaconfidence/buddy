@@ -44,6 +44,8 @@ export type RenderContext = {
 	now: Date;
 	timeZone: string;
 	title: string;
+	/** Shown under the title, e.g. why this is a catch-up. */
+	note?: string;
 };
 
 const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
@@ -128,6 +130,7 @@ function footer(briefing: Briefing, ctx: RenderContext): string {
 
 export function renderBriefing(briefing: Briefing, ctx: RenderContext, maxLinks = LINKS_PER_ITEM): string {
 	const parts = [`**${ctx.title} · ${formatDay(ctx.now, ctx.timeZone)}**`];
+	if (ctx.note) parts.push(`_${ctx.note}_`);
 	if (briefing.tldr) parts.push(briefing.tldr);
 
 	for (const section of SECTIONS) {
@@ -191,7 +194,32 @@ export function renderQuiet(ctx: RenderContext): string {
 		s.messages === 0
 			? `No new messages in your channels since ${since}.`
 			: `Read ${plural(s.messages, "message")} across ${plural(s.channels, "channel")} since ${since}.`;
-	return `**${ctx.title} · ${formatDay(ctx.now, ctx.timeZone)}** — nothing worth surfacing.\n_${detail}_`;
+	const note = ctx.note ? `\n_${ctx.note}_` : "";
+	return `**${ctx.title} · ${formatDay(ctx.now, ctx.timeZone)}** — nothing worth surfacing.${note}\n_${detail}_`;
+}
+
+/**
+ * The notice for a briefing that did not go out. Silence is what hid the
+ * October outage for eight weekdays; one short line costs nothing.
+ */
+export function renderFailure(opts: {
+	title: string;
+	now: Date;
+	timeZone: string;
+	reason: string;
+	retryAt: Date | null;
+	repeated: boolean;
+}): string {
+	const head = `**${opts.title} · ${formatDay(opts.now, opts.timeZone)}** ${opts.repeated ? "still didn't" : "didn't"} go out: ${opts.reason}.`;
+	const next = opts.retryAt
+		? `I'll try again at ${new Intl.DateTimeFormat("en-GB", { timeZone: opts.timeZone, hour: "2-digit", minute: "2-digit", hour12: false }).format(opts.retryAt)}.`
+		: `Tomorrow's briefing will cover today too, or reply "briefing" to try now.`;
+	return `${head} ${next}`;
+}
+
+/** The line explaining a catch-up, under the briefing's title. */
+export function catchUpNote(missed: { firstFailedAt: number; reason: string }, now: Date, timeZone: string): string {
+	return `Catching up: briefings haven't gone out since ${formatSince(new Date(missed.firstFailedAt), now, timeZone)} (${missed.reason}).`;
 }
 
 /** Per-stage counts for the run ledger, so an empty briefing says which stage produced nothing. */

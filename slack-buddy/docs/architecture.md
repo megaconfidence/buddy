@@ -273,8 +273,9 @@ render     one numbered message, each item linking its sources
 
 The digest runs inside the scheduled task rather than as a Workflow. A run is now a
 few minutes: about 10 searches, up to 8 focus-channel reads, up to 25 thread reads,
-and three to six model calls. The task's retry reruns the whole thing, which is
-acceptable once a day. Promote it to a Workflow if a run needs step-level checkpoints.
+and three to six model calls. A failed run is retried by the agent itself, as
+described under "When a briefing fails". Promote it to a Workflow if a run needs
+step-level checkpoints.
 
 ### Collect
 
@@ -349,6 +350,35 @@ stored numbers always match what was shown, and every source stays reachable thr
 
 A direct mention is never dropped silently. If the editor leaves out a conversation
 that mentions the owner, the finaliser puts it back under Needs you.
+
+### When a briefing fails
+
+In October the Slack connector went down and the agent stayed silent for eight
+weekdays: every briefing failed into the run ledger, nothing reached the owner, and the
+MCP registration sat in `authenticating` for good. Three rules now cover that, kept as
+pure functions in `recovery.ts`:
+
+**The owner is told.** The scheduled task's handler owns its retries, because Think's
+retry runs immediately and tells the handler nothing about attempts. A run gets two
+quick attempts, the second on the fallback model if the first was rate limited. If both
+fail, one line goes to the DM: "Morning briefing · Mon 2 Nov didn't go out: the model
+call failed. I'll try again at 09:00." Retries follow at 30 minutes and 2 hours; only
+the last failure is announced again, handing over to the next morning. Reasons are
+fixed phrases, never raw errors, which can carry tool output.
+
+**The connection heals itself.** The gateway authenticates with a bearer header, so
+`authenticating` means it answered 401 and the SDK is waiting for an OAuth callback that
+will never come. That, `failed`, and any handshake state lasting over two minutes count
+as stuck, and the poller replaces the registration with backoff: at once, then after 1,
+2, 4 and 8 minutes, then every 15. While Slack is unreachable the poller reads nothing,
+and the scheduled briefing forces one repair before deciding it cannot run.
+
+**It catches up.** A missed briefing is recorded with the start of its window and kept
+until a later briefing covers it. When Slack comes back, or a retry succeeds, the
+catch-up covers everything since the last briefing that went out, under a line saying
+so: "Catching up: briefings haven't gone out since 21 Oct 08:30 (Slack couldn't be
+reached)." While Slack itself is down nothing can be posted, not even the notice; the
+catch-up is how the owner finds out.
 
 ## What it decides to watch
 
@@ -435,7 +465,7 @@ persists is what the model wrote, thread keys and timestamps, and preferences.
 | `preferences` | liked and disliked examples and preferred formats, fed to both model passes |
 | `topic_signals` | accumulated useful/noise score per query term |
 | `digest_runs` | run ledger and delivery outcome, with per-stage counts |
-| `cursors` | poll watermarks, thread signatures, last activity, digest and briefing times, workspace host |
+| `cursors` | poll watermarks, thread signatures, last activity, digest and briefing times, workspace host, Slack outage and reconnect state, the missed briefing |
 
 The earlier `seen_items` and `digest_items` tables are no longer used. They are left in
 place rather than dropped.
@@ -494,7 +524,7 @@ otherwise wait for an alarm:
 
 | Flag | Effect |
 | --- | --- |
-| `?reconnect=1` | Drop and re-add the MCP registration. `onStart` only runs on a cold start, so a warm object otherwise keeps a broken connection until eviction. |
+| `?reconnect=1` | Drop and re-add the MCP registration now. The poller does this by itself with backoff; this skips the wait. |
 | `?poll=1` | Run a poll immediately instead of waiting for the armed alarm. |
 | `?digest=1[&hours=N]` | Run the sweep now, optionally overriding the lookback window. |
 | `?reset=seen` | Forget which threads have been briefed, so conversations can resurface. |
@@ -505,8 +535,9 @@ briefed_before=… candidates=… findings=… surfaced=… failed_batches=…` 
 those counts "empty" is unreadable — it could equally mean a quiet day, a broken
 search, or an editor that rejected everything.
 
-`/health` also lists the focus channels, the learned workspace host, and the item count
-of the latest briefing.
+`/health` also lists the focus channels, the learned workspace host, the item count of
+the latest briefing, and under `recovery` when Slack went down, how many reconnects
+have been tried, the missed briefing if any, and pending retries.
 
 These endpoints are unauthenticated. They only touch the owner's own DM and cannot leak
 data, but anyone who learns the URL can trigger a poll or a sweep. Add a shared secret
@@ -569,6 +600,13 @@ Slack does not surface in the main DM pane — and because the agent posts under
 owner's own account, no notification is raised either. The agent looked dead while
 answering every message. Conversational replies now set `reply_broadcast`.
 
+**An outage went unnoticed for eight weekdays.** From 21 October the Slack connector
+answered 401. The registration went to `authenticating`, which the repair logic did
+not treat as dead, every scheduled briefing failed into the run ledger, and nothing was
+said in the DM. It surfaced only when `/health` was read on 1 November. Failures are
+now announced, stuck states are repaired with backoff, and missed windows are caught up;
+see "When a briefing fails".
+
 ## Known tradeoffs
 
 - Replies are authored by you. Private to your DM, but visibly your account.
@@ -580,6 +618,8 @@ answering every message. Conversational replies now set `reply_broadcast`.
   tool cannot turn them off. On a heavy day, links drop to one per item before any
   item is cut.
 - A briefing costs three to six model calls instead of one, plus up to 25 thread reads.
+- While Slack itself is unreachable no notice can be posted; the catch-up after it
+  returns is how the owner learns what was missed.
 
 ## Migration path to a bot app
 

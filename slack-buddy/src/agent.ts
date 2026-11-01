@@ -13,12 +13,23 @@ import { runDigest } from "./digest";
 import { MAX_FOCUS_CHANNELS } from "./digest/collect";
 import {
 	briefingTitle,
+	catchUpNote,
 	describeStats,
 	fitBriefing,
+	renderFailure,
 	renderQuiet,
 } from "./digest/render";
 import type { Briefing, Section } from "./digest/types";
 import { applyVerdict, termDirection } from "./feedback";
+import {
+	describeFailure,
+	isConnectionStuck,
+	nextRetryDelaySeconds,
+	parseMissed,
+	reconnectDelayMs,
+	recordMissed,
+	type MissedBriefing,
+} from "./recovery";
 import { SlackClient, type McpCaller } from "./slack/client";
 import { MCP_SERVER_ID, applyToolPolicy } from "./slack/tools";
 import {
@@ -27,8 +38,12 @@ import {
 	LAST_BRIEFING_TS,
 	LAST_DIGEST,
 	LAST_MANUAL_BRIEFING,
+	MISSED_BRIEFING,
 	MODEL_FALLBACK_UNTIL,
 	RATE_LIMITED_UNTIL,
+	SLACK_DOWN_SINCE,
+	SLACK_RECONNECT_AT,
+	SLACK_RECONNECT_ATTEMPTS,
 	Store,
 	TOP_LEVEL_CURSOR,
 	threadSignatureKey,
@@ -152,8 +167,11 @@ export class SlackBuddy extends Think<Env> {
 		// handshake runs. Treating them as stuck tore down a connection that
 		// was about to succeed — on every alarm — so discovery never completed
 		// and the poller spent its whole invocation reconnecting instead of
-		// reading messages. Wait for those; only `failed` needs surgery.
-		const dead = existing?.state === "failed";
+		// reading messages. Wait for those. `failed` needs surgery, and so does
+		// `authenticating`: the gateway uses a bearer header, so that state
+		// means it answered 401 and the SDK is waiting for an OAuth callback
+		// that never comes. That is how the October outage stuck for days.
+		const dead = existing?.state === "failed" || existing?.state === "authenticating";
 		if (existing && (force || dead)) {
 			console.warn(
 				`Dropping MCP registration in state "${existing.state}" (${existing.error ?? "no error"})`,
@@ -184,6 +202,73 @@ export class SlackBuddy extends Think<Env> {
 		).length;
 		console.log(`MCP after connect: state=${state} tools=${tools}`);
 		return { state, tools };
+	}
+
+	/**
+	 * Keep the Slack connection alive. Returns whether it is ready.
+	 *
+	 * A dead or stuck registration is replaced, with backoff, so a long outage
+	 * costs one attempt every 15 minutes rather than one per poll. When the
+	 * connection comes back and a briefing was missed meanwhile, the catch-up
+	 * is scheduled. `force` skips the backoff: the scheduled briefing should
+	 * try a repair before deciding it cannot run.
+	 */
+	async healSlack(force = false): Promise<boolean> {
+		const store = this.store;
+		const now = Date.now();
+		const state = () => this.getMcpServers().servers[MCP_SERVER_ID]?.state;
+
+		if (state() !== "ready") {
+			let downSince = this.readInstant(SLACK_DOWN_SINCE);
+			if (downSince === null) {
+				downSince = now;
+				store.setCursor(SLACK_DOWN_SINCE, now.toString());
+			}
+			if (isConnectionStuck(state(), downSince, now)) {
+				const attempts = Number(store.getCursor(SLACK_RECONNECT_ATTEMPTS) ?? "0");
+				const last = this.readInstant(SLACK_RECONNECT_AT) ?? 0;
+				if (force || now - last >= reconnectDelayMs(attempts)) {
+					store.setCursor(SLACK_RECONNECT_AT, now.toString());
+					store.setCursor(SLACK_RECONNECT_ATTEMPTS, (attempts + 1).toString());
+					await this.connectSlack(true);
+				}
+			} else {
+				await this.mcp.waitForConnections({ timeout: 5_000 }).catch(() => {});
+			}
+			if (state() !== "ready") return false;
+		}
+
+		if (store.getCursor(SLACK_DOWN_SINCE) !== null) {
+			store.deleteCursor(SLACK_DOWN_SINCE);
+			store.deleteCursor(SLACK_RECONNECT_AT);
+			store.deleteCursor(SLACK_RECONNECT_ATTEMPTS);
+			if (this.readMissed()) await this.scheduleCatchUp(5);
+		}
+		return true;
+	}
+
+	private readMissed(): MissedBriefing | null {
+		return parseMissed(this.store.getCursor(MISSED_BRIEFING));
+	}
+
+	private writeMissed(missed: MissedBriefing): void {
+		this.store.setCursor(MISSED_BRIEFING, JSON.stringify(missed));
+	}
+
+	/**
+	 * Arm `retryBriefing`. A pending retry that fires sooner is kept; a later
+	 * one is replaced, so Slack coming back is not left waiting on a retry
+	 * planned for two hours out.
+	 */
+	private async scheduleCatchUp(delaySeconds: number): Promise<void> {
+		const nowSec = Math.floor(Date.now() / 1000);
+		const pending = ((await this.listSchedules()) as PendingSchedule[]).filter(
+			(s): s is PendingSchedule & { id: string; time: number } =>
+				s.callback === "retryBriefing" && typeof s.id === "string" && typeof s.time === "number" && s.time > nowSec,
+		);
+		if (pending.some((s) => s.time <= nowSec + delaySeconds)) return;
+		for (const s of pending) await this.cancelSchedule(s.id).catch(() => {});
+		await this.schedule(delaySeconds, "retryBriefing");
 	}
 
 	getDefaultTimezone(): string {
@@ -485,6 +570,12 @@ export class SlackBuddy extends Think<Env> {
 				rateLimitedUntil: this.readInstant(RATE_LIMITED_UNTIL),
 			},
 			latestBriefingItems: this.store.latestBriefingItems().length,
+			recovery: {
+				slackDownSince: this.readInstant(SLACK_DOWN_SINCE),
+				reconnectAttempts: Number(this.store.getCursor(SLACK_RECONNECT_ATTEMPTS) ?? "0"),
+				missedBriefing: this.readMissed(),
+				pendingRetries: schedules.filter((s) => s.callback === "retryBriefing").map((s) => s.time),
+			},
 			recentRuns: this.store.recentRuns(3),
 		};
 	}
@@ -589,15 +680,8 @@ export class SlackBuddy extends Think<Env> {
 		const slack = this.slack;
 		const dm = this.env.OWNER_DM_CHANNEL_ID;
 
-		// Self-heal only a genuinely broken connection. A transient
-		// `connecting`/`discovering` resolves on its own, and reconnecting on
-		// sight of it is what caused the churn loop.
-		const mcpState = this.getMcpServers().servers[MCP_SERVER_ID]?.state;
-		if (mcpState === undefined || mcpState === "failed") {
-			await this.connectSlack();
-		} else if (mcpState !== "ready") {
-			await this.mcp.waitForConnections({ timeout: 5_000 }).catch(() => {});
-		}
+		// Nothing to read while Slack is unreachable; the next tick tries again.
+		if (!(await this.healSlack())) return;
 
 		const cursor = store.getCursor(TOP_LEVEL_CURSOR);
 		const oldest = pollReadOldest({
@@ -739,12 +823,116 @@ export class SlackBuddy extends Think<Env> {
 		return {
 			dailyDigest: {
 				schedule: "every weekday at 08:30",
-				retry: { maxAttempts: 2 },
+				// The handler owns its retries. Think's retry runs immediately and
+				// tells the handler nothing about attempts, so a failure notice
+				// could not tell a first failure from a final one.
+				retry: { maxAttempts: 1 },
 				handler: async ({ idempotencyKey }) => {
-					await this.runDailyDigest(idempotencyKey);
+					await this.runScheduledBriefing(idempotencyKey);
 				},
 			},
 		};
+	}
+
+	/**
+	 * Start of the window a briefing covers: the last scheduled one, but
+	 * always at least MIN_LOOKBACK_HOURS.
+	 *
+	 * Anchoring purely on the previous run means any run — including a manual
+	 * test at 22:37 — consumes the window the next one would have used, so
+	 * the morning briefing covered only the dead of night and had 7 messages
+	 * to work with instead of 63. `briefed_threads` is what prevents repeats,
+	 * so a wider window is safe.
+	 */
+	private briefingWindowStart(): number {
+		const lastDigest = this.readInstant(LAST_DIGEST);
+		const floor = Date.now() - MIN_LOOKBACK_HOURS * 3_600_000;
+		return Math.min(lastDigest ?? floor, floor);
+	}
+
+	/**
+	 * The scheduled briefing, and every retry and catch-up of it.
+	 *
+	 * Never throws. Two quick attempts, the second on the fallback model if
+	 * the first was rate limited; then the owner is told, and later retries
+	 * are scheduled. A run after a missed one covers everything since the
+	 * last briefing that went out.
+	 */
+	async runScheduledBriefing(runId: string, catchUp = false): Promise<void> {
+		const missed = this.readMissed();
+		const since = Math.min(missed?.since ?? Number.POSITIVE_INFINITY, this.briefingWindowStart());
+		const note = missed ? catchUpNote(missed, new Date(), this.env.OWNER_TIMEZONE) : undefined;
+
+		try {
+			if (!(await this.healSlack(true))) {
+				// Nothing can be posted, not even a notice. The poller keeps
+				// repairing the connection and runs the catch-up once it is back.
+				this.writeMissed(recordMissed(missed, { since, at: Date.now(), reason: "Slack couldn't be reached" }));
+				return;
+			}
+			await this.retry(() => this.runDailyDigest(runId, since, true, { note }), {
+				maxAttempts: 2,
+				baseDelayMs: 5_000,
+				maxDelayMs: 15_000,
+			});
+		} catch (error) {
+			console.error("Briefing failed after retries", error);
+			await this.onBriefingFailed(since, error, !catchUp);
+		}
+	}
+
+	/** Scheduled retry, and catch-up once Slack is back. A no-op once caught up. */
+	async retryBriefing(): Promise<void> {
+		if (!this.readMissed()) return;
+		await this.runScheduledBriefing(`catchup-${Date.now()}`, true);
+	}
+
+	/**
+	 * Record a failed briefing, schedule the next retry, and tell the owner:
+	 * on the first failure and on the last retry, not on the ones between.
+	 * Each scheduled briefing starts its own sequence, so a second bad day is
+	 * announced and retried like the first.
+	 */
+	private async onBriefingFailed(since: number, error: unknown, scheduled: boolean): Promise<void> {
+		try {
+			const { reason } = describeFailure(error);
+			const missed = recordMissed(this.readMissed(), { since, at: Date.now(), reason });
+			if (scheduled) missed.retries = 0;
+			const delay = nextRetryDelaySeconds(missed.retries);
+			if (delay !== null) {
+				missed.retries++;
+				await this.scheduleCatchUp(delay);
+			}
+			this.writeMissed(missed);
+
+			const first = !missed.notified || scheduled;
+			if (!first && delay !== null) return;
+
+			const now = new Date();
+			const timeZone = this.env.OWNER_TIMEZONE;
+			const sent = await this.slack.sendMessage({
+				channelId: this.env.OWNER_DM_CHANNEL_ID,
+				text: renderFailure({
+					title: briefingTitle(now, timeZone),
+					now,
+					timeZone,
+					reason,
+					retryAt: delay !== null ? new Date(now.getTime() + delay * 1000) : null,
+					repeated: !first,
+				}),
+			});
+			this.store.recordSent(sent.ts);
+			this.writeMissed({ ...missed, notified: true });
+		} catch (notifyError) {
+			// Usually Slack itself failing: the catch-up says what was missed.
+			console.error("Could not report the failed briefing", notifyError);
+		}
+	}
+
+	/** A delivered briefing that covers a missed one's window settles it. */
+	private settleMissed(since: Date): void {
+		const missed = this.readMissed();
+		if (missed && since.getTime() <= missed.since) this.store.deleteCursor(MISSED_BRIEFING);
 	}
 
 	async runDailyDigest(
@@ -756,6 +944,7 @@ export class SlackBuddy extends Think<Env> {
 		 * nothing to cover. `briefed_threads` still prevents repeats either way.
 		 */
 		advanceCursor = true,
+		presentation: { note?: string } = {},
 	): Promise<void> {
 		const store = this.store;
 		const slack = this.slack;
@@ -765,18 +954,7 @@ export class SlackBuddy extends Think<Env> {
 		store.prune();
 
 		try {
-			// Always cover at least the last MIN_LOOKBACK_HOURS.
-			//
-			// Anchoring purely on the previous run means any run — including a
-			// manual test at 22:37 — consumes the window the next one would
-			// have used, so the morning briefing covered only the dead of night
-			// and had 7 messages to work with instead of 63. `briefed_threads`
-			// is what prevents repeats, so a wider window is safe.
-			const lastDigest = this.readInstant(LAST_DIGEST);
-			const floor = Date.now() - MIN_LOOKBACK_HOURS * 3_600_000;
-			const since = new Date(
-				sinceOverrideMs ?? Math.min(lastDigest ?? floor, floor),
-			);
+			const since = new Date(sinceOverrideMs ?? this.briefingWindowStart());
 			const now = new Date();
 
 			const result = await runDigest({
@@ -794,6 +972,7 @@ export class SlackBuddy extends Think<Env> {
 				now,
 				timeZone,
 				title: briefingTitle(now, timeZone),
+				note: presentation.note,
 			};
 
 			if (result.status === "empty") {
@@ -810,6 +989,7 @@ export class SlackBuddy extends Think<Env> {
 				// Per-stage counts, so "empty" says which stage produced nothing.
 				store.finishDigestRun(runId, "empty", 0, describeStats(result.stats));
 				if (advanceCursor) store.setCursor(LAST_DIGEST, Date.now().toString());
+				this.settleMissed(since);
 				return;
 			}
 
@@ -829,6 +1009,7 @@ export class SlackBuddy extends Think<Env> {
 			store.setCursor(LAST_BRIEFING_RUN, runId);
 			store.setCursor(LAST_BRIEFING_TS, main.ts);
 			if (advanceCursor) store.setCursor(LAST_DIGEST, Date.now().toString());
+			this.settleMissed(since);
 			store.finishDigestRun(
 				runId,
 				"ok",
