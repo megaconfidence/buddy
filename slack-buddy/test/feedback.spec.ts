@@ -3,8 +3,12 @@ import {
 	DEFAULT_PROFILE,
 	DEMOTE_AT,
 	PROMOTE_AT,
+	SUGGEST_AFTER_BRIEFINGS,
+	SUGGEST_AFTER_USEFUL,
 	applyVerdict,
 	exampleOf,
+	suggestFocusChannel,
+	tallyChannels,
 	termDirection,
 	watchlistAction,
 } from "../src/feedback";
@@ -46,6 +50,57 @@ describe("applyVerdict", () => {
 	it("does not mutate the profile it was given", () => {
 		applyVerdict(DEFAULT_PROFILE, idea, "useful");
 		expect(DEFAULT_PROFILE.positiveExamples).toEqual([]);
+	});
+});
+
+describe("tallyChannels", () => {
+	const src = (channelId: string, channelName: string | null = channelId.toLowerCase()) => ({ channelId, channelName });
+
+	it("counts the briefings a channel fed, once per briefing, and the verdicts on its items", () => {
+		const tallies = tallyChannels([
+			{ runId: "r1", sources: [src("C1"), src("C1")], verdict: "useful" },
+			{ runId: "r1", sources: [src("C1")], verdict: null },
+			{ runId: "r2", sources: [src("C1"), src("C2")], verdict: "noise" },
+		]);
+		expect(tallies.find((t) => t.channelId === "C1")).toEqual({ channelId: "C1", name: "c1", briefings: 2, useful: 1, noise: 1 });
+		expect(tallies.find((t) => t.channelId === "C2")).toEqual({ channelId: "C2", name: "c2", briefings: 1, useful: 0, noise: 1 });
+	});
+});
+
+describe("suggestFocusChannel", () => {
+	const tally = (channelId: string, briefings: number, useful = 0, noise = 0) => ({ channelId, name: channelId.toLowerCase(), briefings, useful, noise });
+	const none = new Set<string>();
+
+	it("suggests a channel that keeps feeding briefings", () => {
+		expect(suggestFocusChannel([tally("C1", SUGGEST_AFTER_BRIEFINGS)], { exclude: none, full: false })?.channelId).toBe("C1");
+	});
+
+	it("suggests a channel whose items were useful, even if it fed few briefings", () => {
+		expect(suggestFocusChannel([tally("C1", 1, SUGGEST_AFTER_USEFUL)], { exclude: none, full: false })?.channelId).toBe("C1");
+	});
+
+	it("needs evidence before suggesting anything", () => {
+		expect(suggestFocusChannel([tally("C1", SUGGEST_AFTER_BRIEFINGS - 1)], { exclude: none, full: false })).toBeNull();
+	});
+
+	it("never suggests a channel mostly marked as noise", () => {
+		expect(suggestFocusChannel([tally("C1", 5, 1, 2)], { exclude: none, full: false })).toBeNull();
+	});
+
+	it("skips focus channels and recent suggestions, and stops when the list is full", () => {
+		const tallies = [tally("C1", 6), tally("C2", 4)];
+		expect(suggestFocusChannel(tallies, { exclude: new Set(["C1"]), full: false })?.channelId).toBe("C2");
+		expect(suggestFocusChannel(tallies, { exclude: none, full: true })).toBeNull();
+	});
+
+	it("prefers what the owner found useful over sheer volume", () => {
+		const best = suggestFocusChannel([tally("C1", 6), tally("C2", 3, 3)], { exclude: none, full: false });
+		expect(best?.channelId).toBe("C2");
+	});
+
+	it("only suggests a named channel the owner can refer to", () => {
+		expect(suggestFocusChannel([{ ...tally("C1", 6), name: null }], { exclude: none, full: false })).toBeNull();
+		expect(suggestFocusChannel([tally("D1", 6)], { exclude: none, full: false })).toBeNull();
 	});
 });
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { TEAM_TERMS } from "../src/digest/collect";
 import {
 	SEARCH_BUDGET,
 	buildQueryPlan,
@@ -19,6 +20,16 @@ describe("buildQueryPlan", () => {
 	it("always leads with the owner mention query", () => {
 		const plan = buildQueryPlan({ ownerId: OWNER, topics: [], now });
 		expect(plan[0]).toEqual(["<@U0BUM44636U>"]);
+	});
+
+	it("always searches the team terms right after the mention", () => {
+		const plan = buildQueryPlan({ ownerId: OWNER, topics: ["OCR", "Vibe"], now });
+		expect(plan[1]).toEqual(["devrel"]);
+	});
+
+	it("does not spend a topic slot on a team term", () => {
+		const plan = buildQueryPlan({ ownerId: OWNER, topics: ["devrel", "OCR"], now });
+		expect(plan.flat().filter((t) => t === "devrel")).toHaveLength(1);
 	});
 
 	it("uses the mention token, not the display name", () => {
@@ -84,8 +95,19 @@ describe("buildQueryPlan with reaction feedback", () => {
 			signals: [{ term: "roadmap", positive: 3, negative: 0 }],
 		});
 		expect(plan.flat()).toContain("roadmap");
-		// Promoted into a topic slot, so it leads the signal rotation.
-		expect(plan.findIndex((q) => q[0] === "roadmap")).toBe(1);
+		// Promoted into a topic slot, so it comes straight after the mention
+		// and team queries, ahead of the signal rotation.
+		expect(plan.findIndex((q) => q[0] === "roadmap")).toBe(1 + TEAM_TERMS.length);
+	});
+
+	it("can drop a team term the owner keeps marking as noise", () => {
+		const plan = buildQueryPlan({
+			ownerId: OWNER,
+			topics: [],
+			now,
+			signals: [{ term: "devrel", positive: 0, negative: 3 }],
+		});
+		expect(plan.flat()).not.toContain("devrel");
 	});
 
 	it("drops a term the owner marked as noise", () => {

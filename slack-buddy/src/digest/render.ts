@@ -46,6 +46,8 @@ export type RenderContext = {
 	title: string;
 	/** Shown under the title, e.g. why this is a catch-up. */
 	note?: string;
+	/** Shown last, e.g. a focus-channel suggestion. */
+	tip?: string;
 };
 
 const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
@@ -122,10 +124,15 @@ function renderItem(item: BriefingItem, maxLinks: number): string {
 	}
 }
 
+/** Said whenever a search failed, so a thin briefing is not mistaken for a quiet day. */
+function partial(s: DigestStats): string {
+	return s.failedSearches > 0 ? ` ${s.failedSearches} of ${s.searches} searches failed, so coverage is partial.` : "";
+}
+
 function footer(briefing: Briefing, ctx: RenderContext): string {
 	const s = ctx.stats;
 	const n = briefing.items.length >= 2 ? 2 : 1;
-	return `_Read ${plural(s.messages, "message")} across ${plural(s.channels, "channel")} since ${formatSince(ctx.since, ctx.now, ctx.timeZone)}. Reply "more on ${n}", "${n} useful" or "${n} noise"._`;
+	return `_Read ${plural(s.messages, "message")} across ${plural(s.channels, "channel")} since ${formatSince(ctx.since, ctx.now, ctx.timeZone)}.${partial(s)} Reply "more on ${n}", "${n} useful" or "${n} noise"._`;
 }
 
 export function renderBriefing(briefing: Briefing, ctx: RenderContext, maxLinks = LINKS_PER_ITEM): string {
@@ -139,6 +146,7 @@ export function renderBriefing(briefing: Briefing, ctx: RenderContext, maxLinks 
 	}
 
 	parts.push(footer(briefing, ctx));
+	if (ctx.tip) parts.push(`_${ctx.tip}_`);
 	return parts.join("\n\n");
 }
 
@@ -191,9 +199,9 @@ export function renderQuiet(ctx: RenderContext): string {
 	const s = ctx.stats;
 	const since = formatSince(ctx.since, ctx.now, ctx.timeZone);
 	const detail =
-		s.messages === 0
+		(s.messages === 0
 			? `No new messages in your channels since ${since}.`
-			: `Read ${plural(s.messages, "message")} across ${plural(s.channels, "channel")} since ${since}.`;
+			: `Read ${plural(s.messages, "message")} across ${plural(s.channels, "channel")} since ${since}.`) + partial(s);
 	const note = ctx.note ? `\n_${ctx.note}_` : "";
 	return `**${ctx.title} · ${formatDay(ctx.now, ctx.timeZone)}** — nothing worth surfacing.${note}\n_${detail}_`;
 }
@@ -217,6 +225,13 @@ export function renderFailure(opts: {
 	return `${head} ${next}`;
 }
 
+/** The closing tip suggesting a focus channel. */
+export function focusTip(channel: { name: string | null; briefings: number; useful: number }): string {
+	const name = `#${(channel.name ?? "").replace(/[^a-z0-9_-]/gi, "")}`;
+	const why = channel.useful > 0 ? `${plural(channel.useful, "item")} you found useful came from ${name}` : `${name} fed ${channel.briefings} of your recent briefings`;
+	return `Tip: ${why}. Reply "focus on ${name}" to read it in full every morning.`;
+}
+
 /** The line explaining a catch-up, under the briefing's title. */
 export function catchUpNote(missed: { firstFailedAt: number; reason: string }, now: Date, timeZone: string): string {
 	return `Catching up: briefings haven't gone out since ${formatSince(new Date(missed.firstFailedAt), now, timeZone)} (${missed.reason}).`;
@@ -226,6 +241,7 @@ export function catchUpNote(missed: { firstFailedAt: number; reason: string }, n
 export function describeStats(s: DigestStats): string {
 	return [
 		`searches=${s.searches}`,
+		`failed_searches=${s.failedSearches}`,
 		`reads=${s.reads}`,
 		`messages=${s.messages}`,
 		`conversations=${s.conversations}`,

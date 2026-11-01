@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
 	FOCUS_TERM,
 	MAX_EXPANSIONS,
+	MAX_PAGES,
 	MENTION_TERM,
 	OWNER_THREAD_TERM,
+	SEARCHES_PER_MINUTE,
+	SEARCH_CALL_BUDGET,
 	assessConversation,
 	channelConversations,
 	collectConversations,
@@ -222,6 +225,12 @@ describe("scoreConversation", () => {
 		expect(mention).toBeGreaterThan(topic);
 	});
 
+	it("ranks a DevRel conversation just below a mention", () => {
+		const devrel = scoreConversation({ ...base, terms: ["devrel"] }, null, watch);
+		expect(devrel).toBeGreaterThan(scoreConversation({ ...base, terms: ["Vibe"] }, null, watch));
+		expect(devrel).toBeLessThan(scoreConversation({ ...base, terms: [MENTION_TERM] }, null, watch));
+	});
+
 	it("ranks a watchlist topic above a generic signal term", () => {
 		expect(scoreConversation({ ...base, terms: ["Vibe"] }, null, watch)).toBeGreaterThan(
 			scoreConversation({ ...base, terms: ["launch"] }, null, watch),
@@ -420,4 +429,151 @@ describe("collectConversations", () => {
 		const { candidates } = await collect(client);
 		expect(candidates).toHaveLength(1);
 	});
+});
+
+describe("search paging and pacing", () => {
+	type Args = { keywords: string[]; filters?: string; cursor?: string };
+
+	/** A client whose every query has more pages than the agent will ever read. */
+	function endlessClient(opts: { clock?: () => number; fail?: (args: Args, call: number) => Error | null } = {}) {
+		const calls: Array<{ query: string; cursor?: string; at: number }> = [];
+		let n = 0;
+		const client = {
+			searchJoined: async (args: Args) => {
+				const call = n++;
+				const query = args.filters ? "owner" : args.keywords[0];
+				calls.push({ query, cursor: args.cursor, at: opts.clock?.() ?? 0 });
+				const error = opts.fail?.(args, call);
+				if (error) throw error;
+				// Distinct messages per query and page, so nothing deduplicates away.
+				const page = Number(args.cursor ?? "0");
+				const author = args.filters ? OWNER : "U1";
+				const hits = Array.from({ length: 20 }, (_, i) => hit(ts(call * 100 + i + 1), author, { text: `${query} page ${page} message ${i} with enough words` }));
+				return { hits, nextCursor: String(page + 1) };
+			},
+			readThread: async () => {
+				throw new Error("not needed");
+			},
+			readChannel: async () => [],
+		} as unknown as Pick<SlackClient, "searchJoined" | "readChannel" | "readThread">;
+		return { client, calls };
+	}
+
+	function fakePace(perMinute = SEARCHES_PER_MINUTE) {
+		let clock = 0;
+		const sleeps: number[] = [];
+		return {
+			sleeps,
+			now: () => clock,
+			pace: {
+				perMinute,
+				now: () => clock,
+				sleep: async (ms: number) => {
+					sleeps.push(ms);
+					clock += ms;
+				},
+			},
+		};
+	}
+
+	const run = (client: Pick<SlackClient, "searchJoined" | "readChannel" | "readThread">, plan: string[][], pace: ReturnType<typeof fakePace>["pace"]) =>
+		collectConversations({
+			client,
+			plan,
+			ownerId: OWNER,
+			since: SINCE,
+			watchlist: ["OCR", "Vibe", "Le Chat", "Codestral", "Magistral"],
+			focusChannels: [],
+			workspaceHost: null,
+			briefedLatest: () => undefined,
+			pace,
+		});
+
+	const pagesFor = (calls: Array<{ query: string }>, query: string) => calls.filter((c) => c.query === query).length;
+
+	it("pages deepest where a miss costs most", async () => {
+		const { client, calls } = endlessClient();
+		await run(client, [[`<@${OWNER}>`], ["devrel"], ["Vibe"], ["launch"]], fakePace().pace);
+
+		expect(pagesFor(calls, `<@${OWNER}>`)).toBe(MAX_PAGES.mention);
+		expect(pagesFor(calls, "devrel")).toBe(MAX_PAGES.team);
+		expect(pagesFor(calls, "owner")).toBe(MAX_PAGES.owner);
+		expect(pagesFor(calls, "Vibe")).toBe(MAX_PAGES.topic);
+		expect(pagesFor(calls, "launch")).toBe(MAX_PAGES.signal);
+	});
+
+	it("follows the cursor Slack returned", async () => {
+		const { client, calls } = endlessClient();
+		await run(client, [[`<@${OWNER}>`]], fakePace().pace);
+		expect(calls.filter((c) => c.query === `<@${OWNER}>`).map((c) => c.cursor)).toEqual([undefined, "1", "2"]);
+	});
+
+	it("never pages a quiet day", async () => {
+		const quiet = fakeQuietClient();
+		await run(quiet.client, [[`<@${OWNER}>`], ["devrel"], ["Vibe"]], fakePace().pace);
+		// Three planned queries and the owner's posts, one page each.
+		expect(quiet.calls).toBe(4);
+	});
+
+	it("stays within the call budget, cutting the least valuable pages first", async () => {
+		const { client, calls } = endlessClient();
+		const plan = [[`<@${OWNER}>`], ["devrel"], ["OCR"], ["Vibe"], ["Le Chat"], ["Codestral"], ["Magistral"], ["launch"], ["blog"]];
+		const { stats } = await run(client, plan, fakePace().pace);
+
+		expect(calls).toHaveLength(SEARCH_CALL_BUDGET);
+		expect(stats.searches).toBe(SEARCH_CALL_BUDGET);
+		expect(pagesFor(calls, `<@${OWNER}>`)).toBe(3);
+		expect(pagesFor(calls, "owner")).toBe(3);
+		expect(pagesFor(calls, "devrel")).toBe(3);
+		// Topics get their second page in plan order until the budget runs out.
+		expect(pagesFor(calls, "Magistral")).toBe(1);
+	});
+
+	it("never makes more than ten searches in any minute", async () => {
+		const pacing = fakePace();
+		const { client, calls } = endlessClient({ clock: pacing.now });
+		await run(client, [[`<@${OWNER}>`], ["devrel"], ["OCR"], ["Vibe"], ["Le Chat"], ["Codestral"], ["launch"], ["blog"], ["beta"]], pacing.pace);
+
+		expect(pacing.sleeps.length).toBeGreaterThan(0);
+		const times = calls.map((c) => c.at);
+		for (const start of times) {
+			expect(times.filter((t) => t >= start && t < start + 60_000).length).toBeLessThanOrEqual(SEARCHES_PER_MINUTE);
+		}
+	});
+
+	it("waits and retries once when Slack rate-limits a search", async () => {
+		const pacing = fakePace();
+		const { client, calls } = endlessClient({
+			fail: (_, call) => (call === 0 ? new Error("slack_search_public_and_private failed: ratelimited") : null),
+		});
+		const { stats } = await run(client, [[`<@${OWNER}>`]], pacing.pace);
+
+		expect(pacing.sleeps).toContain(20_000);
+		expect(calls[1].query).toBe(`<@${OWNER}>`);
+		expect(stats.failedSearches).toBe(0);
+	});
+
+	it("counts a search that failed, so the briefing can say coverage was partial", async () => {
+		const { client } = endlessClient({ fail: (args) => (args.keywords[0] === "Vibe" ? new Error("internal_error") : null) });
+		const { stats } = await run(client, [[`<@${OWNER}>`], ["Vibe"]], fakePace().pace);
+		expect(stats.failedSearches).toBe(1);
+	});
+
+	function fakeQuietClient() {
+		let calls = 0;
+		const client = {
+			searchJoined: async () => {
+				calls++;
+				return { hits: [], nextCursor: null };
+			},
+			readThread: async () => [],
+			readChannel: async () => [],
+		} as unknown as Pick<SlackClient, "searchJoined" | "readChannel" | "readThread">;
+		return {
+			client,
+			get calls() {
+				return calls;
+			},
+		};
+	}
 });

@@ -22,17 +22,35 @@ import { emptyStats, type Assessment, type Candidate, type Conversation, type Co
  * at a time.
  */
 
-/** Query slots per run, mention query included. */
-export const SEARCH_BUDGET = 8;
+/** Query slots per run (the first page of each), mention and team queries included. */
+export const SEARCH_BUDGET = 9;
+/** Search calls per run, every page and retry counted, as Slack counts them. */
+export const SEARCH_CALL_BUDGET = 20;
+/** Slack's per-user search limit is about ten a minute, with bursts. */
+export const SEARCHES_PER_MINUTE = 10;
 export const MAX_TOPIC_QUERIES = 4;
 export const MAX_FOCUS_CHANNELS = 8;
 /** Thread reads per run. */
 export const MAX_EXPANSIONS = 25;
 /** Conversations handed to the model. */
 export const MAX_CANDIDATES = 60;
-/** Mentions are the one query worth a second page. */
-const MENTION_PAGES = 2;
 const PAGE_SIZE = 20;
+/** How long to wait before retrying a search Slack rate-limited. */
+const RATE_LIMIT_WAIT_MS = 20_000;
+
+/**
+ * Always searched, right after the owner's mention. Asks for DevRel here say
+ * "devrel" in plain words: a month of results held 60+ such messages and no
+ * user-group mention at all (probed live, 2026-11-01).
+ */
+export const TEAM_TERMS = ["devrel"];
+
+type QueryKind = "mention" | "owner" | "team" | "topic" | "signal";
+
+/** Pages per query when Slack has more. Deepest where a miss costs most. */
+export const MAX_PAGES: Record<QueryKind, number> = { mention: 3, owner: 3, team: 3, topic: 2, signal: 1 };
+/** The order extra pages are fetched in, within the call budget. */
+const PAGE_PRIORITY: QueryKind[] = ["mention", "owner", "team", "topic", "signal"];
 const READ_CONCURRENCY = 4;
 /** Focus channels are read this far before the window, to catch older threads that came back to life. */
 const FOCUS_LOOKBACK_SECONDS = 2 * 86_400;
@@ -59,13 +77,20 @@ function rotate(pool: string[], now: Date, count: number): string[] {
 }
 
 /**
- * Build the day's query plan. The first query is always the owner mention.
+ * Build the day's query plan. The first query is always the owner mention,
+ * then the team terms.
  *
  * Feedback steers this: terms the owner rated useful are promoted into the
- * scarce topic slots, and terms marked as noise are dropped from the rotating
- * pools entirely.
+ * scarce topic slots, and terms marked as noise are dropped, team terms
+ * included.
  */
-export function buildQueryPlan(opts: { ownerId: string; topics: string[]; now: Date; signals?: TopicSignal[] }): string[][] {
+export function buildQueryPlan(opts: {
+	ownerId: string;
+	topics: string[];
+	now: Date;
+	signals?: TopicSignal[];
+	teamTerms?: string[];
+}): string[][] {
 	const promoted: string[] = [];
 	const demoted = new Set<string>();
 
@@ -75,9 +100,11 @@ export function buildQueryPlan(opts: { ownerId: string; topics: string[]; now: D
 		if (action === "demote") demoted.add(s.term);
 	}
 
-	const topics = [...opts.topics, ...promoted].filter((t, i, all) => !demoted.has(t) && all.indexOf(t) === i);
+	const team = (opts.teamTerms ?? TEAM_TERMS).filter((t) => !demoted.has(t));
+	const topics = [...opts.topics, ...promoted].filter((t, i, all) => !demoted.has(t) && !team.includes(t) && all.indexOf(t) === i);
 
 	const plan: string[][] = [[`<@${opts.ownerId}>`]];
+	for (const term of team) plan.push([term]);
 	for (const topic of topics.slice(0, MAX_TOPIC_QUERIES)) plan.push([topic]);
 
 	const remaining = Math.max(0, SEARCH_BUDGET - plan.length);
@@ -321,17 +348,25 @@ export function assessConversation(
  * Rank a conversation. Before a thread read only the search terms are known;
  * afterwards the assessment adds who is waiting on whom.
  */
-export function scoreConversation(conv: Conversation, assessment: Assessment | null, watchlist: ReadonlySet<string>): number {
+export function scoreConversation(
+	conv: Conversation,
+	assessment: Assessment | null,
+	watchlist: ReadonlySet<string>,
+	team: ReadonlySet<string> = new Set(TEAM_TERMS),
+): number {
 	let score = 0;
 	const mention = assessment ? assessment.mentionsOwner : conv.terms.includes(MENTION_TERM);
 	if (mention) score += 100;
 	if (assessment?.awaitingOwner) score += 50;
 	else if (!assessment && conv.terms.includes(OWNER_THREAD_TERM)) score += 25;
 
-	const topical = conv.terms.filter((t) => !STRUCTURAL_TERMS.has(t));
-	const topics = topical.filter((t) => watchlist.has(t.toLowerCase())).length;
+	const topical = conv.terms.filter((t) => !STRUCTURAL_TERMS.has(t)).map((t) => t.toLowerCase());
+	const teamHits = topical.filter((t) => team.has(t)).length;
+	const topics = topical.filter((t) => !team.has(t) && watchlist.has(t)).length;
+	// Someone talking about DevRel is the next best thing to a mention.
+	if (teamHits > 0) score += 60;
 	score += 30 * Math.min(2, topics);
-	score += 10 * Math.min(2, topical.length - topics);
+	score += 10 * Math.min(2, topical.length - teamHits - topics);
 	if (conv.terms.includes(FOCUS_TERM)) score += 20;
 	score += Math.min(20, Math.round(4 * Math.log2(1 + conv.messages.length)));
 	return score;
@@ -352,6 +387,79 @@ export type CollectResult = {
 	workspaceHost: string | null;
 };
 
+/** Clock and sleep for search pacing; replaced in tests. */
+export type Pace = { perMinute: number; now: () => number; sleep: (ms: number) => Promise<void> };
+
+const REAL_PACE: Pace = {
+	perMinute: SEARCHES_PER_MINUTE,
+	now: () => Date.now(),
+	sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/** A sliding-window limiter: bursts up to the limit, then one call as each minute-old call ages out. */
+function searchLimiter(pace: Pace): () => Promise<void> {
+	const recent: number[] = [];
+	return async () => {
+		for (;;) {
+			const now = pace.now();
+			while (recent.length > 0 && now - recent[0] >= 60_000) recent.shift();
+			if (recent.length < pace.perMinute) {
+				recent.push(now);
+				return;
+			}
+			await pace.sleep(60_000 - (now - recent[0]) + 50);
+		}
+	};
+}
+
+const RATE_LIMITED = /rate.?limit|\b429\b|too many requests/i;
+
+type PlannedQuery = {
+	kind: QueryKind;
+	/** What the conversations it finds are tagged with. */
+	term: string;
+	args: { keywords: string[]; filters?: string; naturalLanguageQuery: string; includeContext: boolean };
+	hits: SearchHit[];
+	pages: number;
+	cursor: string | null;
+	done: boolean;
+};
+
+const UPCOMING_AND_CONTENT = new Set([...UPCOMING_SIGNALS, ...CONTENT_SIGNALS].map((t) => t.toLowerCase()));
+
+function planQueries(plan: string[][], ownerId: string, team: ReadonlySet<string>): PlannedQuery[] {
+	const query = (kind: QueryKind, term: string, args: PlannedQuery["args"]): PlannedQuery => ({
+		kind,
+		term,
+		args,
+		hits: [],
+		pages: 0,
+		cursor: null,
+		done: false,
+	});
+	const queries = plan.map((keywords, index) => {
+		const word = keywords[0].toLowerCase();
+		const kind: QueryKind = index === 0 ? "mention" : team.has(word) ? "team" : UPCOMING_AND_CONTENT.has(word) ? "signal" : "topic";
+		return query(kind, kind === "mention" ? MENTION_TERM : keywords[0], {
+			keywords,
+			naturalLanguageQuery: kind === "mention" ? "" : `${keywords[0]} news relevant to a developer advocate`,
+			includeContext: true,
+		});
+	});
+	// The owner's own posts in the window: what they have already answered, and
+	// threads where someone has answered them. Posts before the window cannot
+	// postdate any hit, so the window is exactly what is needed.
+	queries.push(
+		query("owner", OWNER_THREAD_TERM, {
+			keywords: [],
+			filters: `from:<@${ownerId}>`,
+			naturalLanguageQuery: "",
+			includeContext: false,
+		}),
+	);
+	return queries;
+}
+
 export async function collectConversations(opts: {
 	client: Pick<SlackClient, "searchJoined" | "readChannel" | "readThread">;
 	plan: string[][];
@@ -361,75 +469,78 @@ export async function collectConversations(opts: {
 	focusChannels: Array<{ channelId: string; name: string }>;
 	workspaceHost: string | null;
 	briefedLatest: (key: string) => number | undefined;
+	teamTerms?: string[];
+	pace?: Pace;
 }): Promise<CollectResult> {
 	const stats = emptyStats();
 	const sinceSec = Math.floor(opts.since.getTime() / 1000);
 	const after = sinceSec.toString();
 	const conversations = new Map<string, Conversation>();
 	const seen = new Set<string>();
+	const team = new Set((opts.teamTerms ?? TEAM_TERMS).map((t) => t.toLowerCase()));
+	const pace = opts.pace ?? REAL_PACE;
+	const limit = searchLimiter(pace);
 	let host = opts.workspaceHost;
 
 	const note = (channelId: string | null, ts: string) => seen.add(`${channelId ?? "?"}:${ts}`);
 
-	const search = async (args: { keywords: string[]; filters?: string; naturalLanguageQuery?: string; includeContext?: boolean }, pages: number) => {
-		const hits: SearchHit[] = [];
-		let cursor: string | undefined;
-		for (let page = 0; page < pages; page++) {
+	/** Fetch a query's next page. A failure ends that query, never the run. */
+	const fetchPage = async (q: PlannedQuery): Promise<void> => {
+		for (let attempt = 0; attempt < 2; attempt++) {
+			await limit();
 			stats.searches++;
-			let result: Awaited<ReturnType<typeof opts.client.searchJoined>>;
 			try {
-				result = await opts.client.searchJoined({ ...args, after, limit: PAGE_SIZE, cursor });
+				const page = await opts.client.searchJoined({ ...q.args, after, limit: PAGE_SIZE, cursor: q.cursor ?? undefined });
+				q.pages++;
+				q.hits.push(...page.hits);
+				q.cursor = page.nextCursor;
+				q.done = !page.nextCursor || page.hits.length < PAGE_SIZE || q.pages >= MAX_PAGES[q.kind];
+				return;
 			} catch (error) {
-				// A later page failing keeps what the earlier ones found.
-				if (page === 0) throw error;
-				break;
+				// One wait-and-retry for Slack's rate limit; anything else, or a
+				// second refusal, costs this query's remaining pages only.
+				if (attempt === 0 && RATE_LIMITED.test(String(error))) {
+					await pace.sleep(RATE_LIMIT_WAIT_MS);
+					continue;
+				}
+				stats.failedSearches++;
+				q.done = true;
+				return;
 			}
-			hits.push(...result.hits);
-			if (!result.nextCursor || result.hits.length < PAGE_SIZE) break;
-			cursor = result.nextCursor;
 		}
-		for (const hit of hits) {
-			note(hit.channelId, hit.ts);
-			host ??= workspaceHostOf(hit.permalink);
-		}
-		return hits;
 	};
 
-	for (const [index, keywords] of opts.plan.entries()) {
-		const mention = index === 0;
-		const term = mention ? MENTION_TERM : keywords[0];
-		try {
-			const hits = await search(
-				{
-					keywords,
-					naturalLanguageQuery: mention ? "" : `${keywords[0]} news relevant to a developer advocate`,
-				},
-				mention ? MENTION_PAGES : 1,
-			);
-			groupHits(
-				hits.map((hit) => ({ hit, term, mention })),
-				conversations,
-			);
-		} catch {
-			// A failed query degrades coverage, not the run.
+	// First pages for every query, then deeper pages where Slack has more,
+	// most valuable query first, until the call budget is spent: a third
+	// page of mentions beats a second page of a fifth topic. A quiet day
+	// never pages; a Monday covering the weekend does.
+	const queries = planQueries(opts.plan, opts.ownerId, team);
+	for (const q of queries) await fetchPage(q);
+	for (const kind of PAGE_PRIORITY) {
+		for (const q of queries) {
+			while (q.kind === kind && !q.done && stats.searches < SEARCH_CALL_BUDGET) await fetchPage(q);
 		}
 	}
 
-	// The owner's own posts in the window: what they have already answered,
-	// and threads where someone has answered them. Posts before the window
-	// cannot postdate any hit, so the window is exactly what is needed.
 	let ownerPosts = new Map<string, number>();
-	try {
-		const posts = (await search({ keywords: [], filters: `from:<@${opts.ownerId}>`, includeContext: false }, 1)).filter(
-			(hit) => hit.authorId === opts.ownerId,
-		);
-		ownerPosts = lastOwnerPosts(posts, opts.ownerId);
-		groupHits(
-			posts.map((hit) => ({ hit, term: OWNER_THREAD_TERM })),
-			conversations,
-		);
-	} catch {
-		// Degrades to surfacing threads the owner already answered.
+	for (const q of queries) {
+		for (const hit of q.hits) {
+			note(hit.channelId, hit.ts);
+			host ??= workspaceHostOf(hit.permalink);
+		}
+		if (q.kind === "owner") {
+			const posts = q.hits.filter((hit) => hit.authorId === opts.ownerId);
+			ownerPosts = lastOwnerPosts(posts, opts.ownerId);
+			groupHits(
+				posts.map((hit) => ({ hit, term: OWNER_THREAD_TERM })),
+				conversations,
+			);
+		} else {
+			groupHits(
+				q.hits.map((hit) => ({ hit, term: q.term, mention: q.kind === "mention" })),
+				conversations,
+			);
+		}
 	}
 
 	for (const channel of opts.focusChannels.slice(0, MAX_FOCUS_CHANNELS)) {
@@ -470,7 +581,7 @@ export async function collectConversations(opts: {
 	// Read the most promising threads in full. A keyword hit is one message;
 	// the decision, the date and the ask are usually in the replies.
 	const watchlist = new Set(opts.watchlist.map((t) => t.toLowerCase()));
-	pool.sort((a, b) => scoreConversation(b, null, watchlist) - scoreConversation(a, null, watchlist) || b.activityTs - a.activityTs);
+	pool.sort((a, b) => scoreConversation(b, null, watchlist, team) - scoreConversation(a, null, watchlist, team) || b.activityTs - a.activityTs);
 	await mapLimit(
 		pool.filter((c) => c.expandable).slice(0, MAX_EXPANSIONS),
 		READ_CONCURRENCY,
@@ -499,7 +610,7 @@ export async function collectConversations(opts: {
 			briefedLatest,
 		});
 		if (assessment.status === "keep") {
-			candidates.push({ ...conv, assessment, score: scoreConversation(conv, assessment, watchlist), briefedLatest, sinceSec });
+			candidates.push({ ...conv, assessment, score: scoreConversation(conv, assessment, watchlist, team), briefedLatest, sinceSec });
 		} else if (assessment.status === "own" || assessment.status === "engaged") {
 			stats.engaged++;
 		} else if (assessment.status === "briefed") {

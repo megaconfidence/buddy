@@ -143,6 +143,8 @@ export type Briefing = {
 /** Per-stage counts, so an empty briefing says which stage produced nothing. */
 export type DigestStats = {
 	searches: number;
+	/** Queries that ended on an error. Coverage was partial when this is above zero. */
+	failedSearches: number;
 	reads: number;
 	/** Unique messages seen across searches and reads. */
 	messages: number;
@@ -166,6 +168,7 @@ export type DigestResult =
 
 export const emptyStats = (): DigestStats => ({
 	searches: 0,
+	failedSearches: 0,
 	reads: 0,
 	messages: 0,
 	conversations: 0,

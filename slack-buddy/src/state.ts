@@ -142,6 +142,15 @@ export class Store {
 				updated_at INTEGER NOT NULL
 			)
 		`;
+		// When each channel was last suggested as a focus channel, so a tip is
+		// not repeated every morning.
+		this.sql`
+			CREATE TABLE IF NOT EXISTS focus_suggestions (
+				channel_id TEXT PRIMARY KEY,
+				name TEXT NOT NULL DEFAULT '',
+				suggested_at INTEGER NOT NULL
+			)
+		`;
 	}
 
 	// ---------------------------------------------------------- sent ledger
@@ -237,6 +246,35 @@ export class Store {
 		return this.focusChannels().length < before;
 	}
 
+	/**
+	 * A channel's id from its name, as seen in recent briefing sources. Lets
+	 * "focus on #launches" work without a channel search, for any channel a
+	 * briefing has cited.
+	 */
+	knownChannelId(name: string): string | null {
+		const target = name.replace(/^#/, "").toLowerCase();
+		for (const item of this.briefingItemsSince(0)) {
+			const source = item.sources.find((s) => s.channelName?.toLowerCase() === target);
+			if (source) return source.channelId;
+		}
+		return null;
+	}
+
+	markFocusSuggested(channelId: string, name: string, now = Date.now()): void {
+		this.sql`
+			INSERT INTO focus_suggestions (channel_id, name, suggested_at) VALUES (${channelId}, ${name}, ${now})
+			ON CONFLICT(channel_id) DO UPDATE SET name = excluded.name, suggested_at = excluded.suggested_at
+		`;
+	}
+
+	focusSuggestedSince(sinceMs: number): Set<string> {
+		return new Set(
+			this.sql<{ channel_id: string }>`
+				SELECT channel_id FROM focus_suggestions WHERE suggested_at >= ${sinceMs}
+			`.map((r) => r.channel_id),
+		);
+	}
+
 	// ---------------------------------------------------------- digest runs
 
 	startDigestRun(id: string, now = Date.now()): void {
@@ -316,6 +354,14 @@ export class Store {
 
 	setVerdict(runId: string, number: number, verdict: Verdict): void {
 		this.sql`UPDATE briefing_items SET verdict = ${verdict} WHERE run_id = ${runId} AND number = ${number}`;
+	}
+
+	/** Every briefing item since a time, newest first: sources and verdicts for channel tallies. */
+	briefingItemsSince(sinceMs: number): StoredBriefingItem[] {
+		return this.sql<{ run_id: string; item_json: string; verdict: string | null; created_at: number }>`
+			SELECT run_id, item_json, verdict, created_at FROM briefing_items
+			WHERE created_at >= ${sinceMs} ORDER BY created_at DESC, number
+		`.map((row) => this.hydrate(row));
 	}
 
 	/** What recent briefings said, so the editor reports changes rather than repeats. */

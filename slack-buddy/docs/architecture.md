@@ -271,9 +271,9 @@ finalise   ids checked against our records, permalinks attached, mentions guaran
 render     one numbered message, each item linking its sources
 ```
 
-The digest runs inside the scheduled task rather than as a Workflow. A run is now a
-few minutes: about 10 searches, up to 8 focus-channel reads, up to 25 thread reads,
-and three to six model calls. A failed run is retried by the agent itself, as
+The digest runs inside the scheduled task rather than as a Workflow. A run is now one
+to a few minutes: 10 to 20 searches, up to 8 focus-channel reads, up to 25 thread
+reads, and three to six model calls. A failed run is retried by the agent itself, as
 described under "When a briefing fails". Promote it to a Workflow if a run needs
 step-level checkpoints.
 
@@ -282,14 +282,24 @@ step-level checkpoints.
 Search is the scarce call, so it is spent on discovery. Thread reads are cheap, so
 they are spent on depth.
 
-| Pass | Calls | Purpose |
+| Pass | Pages | Purpose |
 | --- | --- | --- |
-| Mentions | up to 2 pages | `<@U0BUM44636U>` since the window opened, always ranked first |
-| Watchlist | 1 per topic, up to 4 | OCR, Vibe, and anything promoted by feedback |
-| Signal pools | the rest of the 8 slots | `launch·roadmap·shipping·GA·beta·rollout` and `blog·talk·demo·webinar·cookbook·tutorial`, rotated daily |
-| Owner posts | 1 | `from:<@owner>`: what the owner has answered, and threads where someone answered them |
+| Mentions | up to 3 | `<@U0BUM44636U>` since the window opened, always ranked first |
+| Team | up to 3 | `devrel`, always searched. People here ask for DevRel in plain words: a month of results held 60+ such messages and no user-group mention at all |
+| Owner posts | up to 3 | `from:<@owner>`: what the owner has answered, and threads where someone answered them |
+| Watchlist | up to 2 each, 4 topics | OCR, Vibe, and anything promoted by feedback |
+| Signal pools | 1 each, the rest of the 9 slots | `launch·roadmap·shipping·GA·beta·rollout` and `blog·talk·demo·webinar·cookbook·tutorial`, rotated daily |
 | Focus channels | 1 read each, up to 8 | read in full instead of sampled; optional, managed in conversation |
 | Thread reads | up to 25 | the highest-ranked conversations, read whole |
+
+Every query gets its first page. Deeper pages are fetched only where Slack has more,
+most valuable query first, within 20 search calls per run, so a quiet day never pages
+and a Monday covering the weekend does. Calls are paced to 10 in any minute, Slack's
+per-user limit; a rate-limited search waits 20 seconds and retries once. A search that
+still fails costs its own query, is counted in the run log, and is reported in the
+briefing's footer ("3 of 18 searches failed, so coverage is partial") so a thin
+briefing is not mistaken for a quiet day. A 72-hour window, probed live, made 11
+searches: no more than 10 in any minute, none failed, and one query paged.
 
 Hits are grouped by thread, using the permalink's `thread_ts`, so three hits from one
 launch thread become one conversation rather than three items. The best-ranked
@@ -297,9 +307,9 @@ conversations are then read in full: a keyword hit is one message, but the date,
 decision and the ask are usually in the replies. When a thread read and a search hit
 disagree about a message, the thread's fuller text wins.
 
-Ranking puts mentions first, then threads where someone replied after the owner's last
-post, watchlist topics, focus channels, signal terms, and thread size. At most 60
-conversations reach the model.
+Ranking puts mentions first, then conversations about DevRel, threads where someone
+replied after the owner's last post, watchlist topics, focus channels, signal terms,
+and thread size. At most 60 conversations reach the model.
 
 ### Map and reduce
 
@@ -382,21 +392,30 @@ catch-up is how the owner finds out.
 
 ## What it decides to watch
 
-Five inputs, in order of strength:
+Six inputs, in order of strength:
 
 | Input | Role |
 | --- | --- |
 | Owner mention token | always query #1, always ranked first, guaranteed a line |
-| Focus channels | read in full every run; up to 8, managed in conversation |
+| Team terms | `devrel`, always searched and ranked just below a mention; `TEAM_TERMS` in `collect.ts` |
+| Focus channels | read in full every run; up to 8, managed in conversation, suggested from evidence |
 | Watchlist | up to 4 topic queries; seeded `OCR`, `Vibe`; editable in conversation |
 | Two signal pools | `launch·roadmap·shipping·GA·beta·rollout`, `blog·talk·demo·webinar·cookbook·tutorial`, rotated daily |
 | The model | reads whole conversations, keeps what a developer advocate needs, writes the briefing |
 
 Keyword retrieval is blunt on purpose — the gateway AND-s keywords with no OR, and each
-query costs one of eight slots. `natural_language_query` is passed on topic and signal
+query costs one of nine slots. `natural_language_query` is passed on topic and signal
 queries for semantic reranking; whether this account supports it is unconfirmed. Focus
 channels exist for what keywords miss: in a channel like `#launches`, every message
 matters, whatever words it uses.
+
+**Focus channels are suggested, not guessed.** The gateway cannot list the channels the
+owner has joined, so suggestions come from evidence: a channel that fed at least three
+briefings in the last two weeks, or two items the owner rated useful, and whose items
+were not marked noise more often than useful. The briefing then ends with one tip,
+"Reply "focus on #launches" to read it in full every morning", and the same channel is
+not suggested again for a month. "focus on #launches" resolves the name from channels
+recent briefings cited, so it needs no channel search.
 
 **Feedback is a reply.** With one message there is no item to react to, so the owner
 replies with a number instead: "3 useful", "5 noise", "2 done". The agent records the
@@ -405,8 +424,9 @@ verdict with `rate_briefing_item`, which does two things, as in changelog-buddy:
 - The item joins a preference profile of liked and disliked examples, plus preferred
   content formats, that both model passes read on every run.
 - The query terms that surfaced it are scored in `topic_signals`. At +2 a term is
-  promoted into a scarce topic slot; at −2 it is dropped from the pools entirely, so the
-  plan moves toward what the owner engages with.
+  promoted into a scarce topic slot; at −2 it is dropped from the plan entirely, team
+  terms included, so the plan moves toward what the owner engages with.
+- Its channels count toward a focus-channel suggestion, or against one.
 
 Verdicts are captured as they are given, not harvested a day later, and they work on
 any item, including ones the owner never opened.
@@ -463,6 +483,7 @@ persists is what the model wrote, thread keys and timestamps, and preferences.
 | `watchlist` | tracked topics and aliases, editable in conversation |
 | `focus_channels` | channels read in full every run, editable in conversation |
 | `preferences` | liked and disliked examples and preferred formats, fed to both model passes |
+| `focus_suggestions` | when each channel was last suggested as a focus channel |
 | `topic_signals` | accumulated useful/noise score per query term |
 | `digest_runs` | run ledger and delivery outcome, with per-stage counts |
 | `cursors` | poll watermarks, thread signatures, last activity, digest and briefing times, workspace host, Slack outage and reconnect state, the missed briefing |
@@ -529,8 +550,8 @@ otherwise wait for an alarm:
 | `?digest=1[&hours=N]` | Run the sweep now, optionally overriding the lookback window. |
 | `?reset=seen` | Forget which threads have been briefed, so conversations can resurface. |
 
-Every run records `searches=… reads=… messages=… conversations=… engaged=…
-briefed_before=… candidates=… findings=… surfaced=… failed_batches=…` in
+Every run records `searches=… failed_searches=… reads=… messages=… conversations=…
+engaged=… briefed_before=… candidates=… findings=… surfaced=… failed_batches=…` in
 `digest_runs.note`, so an empty briefing says which stage produced nothing. Without
 those counts "empty" is unreadable — it could equally mean a quiet day, a broken
 search, or an editor that rejected everything.
@@ -618,6 +639,9 @@ see "When a briefing fails".
   tool cannot turn them off. On a heavy day, links drop to one per item before any
   item is cut.
 - A briefing costs three to six model calls instead of one, plus up to 25 thread reads.
+- Staying under Slack's search limit costs time: a run needing more than 10 searches
+  waits for the minute to roll over, so a busy day's search phase takes one to two
+  minutes.
 - While Slack itself is unreachable no notice can be posted; the catch-up after it
   returns is how the owner learns what was missed.
 

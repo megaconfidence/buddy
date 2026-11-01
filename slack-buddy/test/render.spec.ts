@@ -5,6 +5,7 @@ import {
 	briefingTitle,
 	catchUpNote,
 	fitBriefing,
+	focusTip,
 	renderBriefing,
 	renderFailure,
 	renderQuiet,
@@ -214,7 +215,7 @@ describe("renderFailure", () => {
 	});
 });
 
-describe("catch-up note", () => {
+describe("notes, tips and partial coverage", () => {
 	const missed = { firstFailedAt: Date.UTC(2026, 8, 16, 7, 30), reason: "Slack couldn't be reached" };
 
 	it("explains a catch-up under the title", () => {
@@ -223,6 +224,20 @@ describe("catch-up note", () => {
 		const text = renderBriefing(typical, { ...ctx, note });
 		expect(text.split("\n\n")[1]).toBe(`_${note}_`);
 		expect(renderQuiet({ ...ctx, note })).toContain(`\n_${note}_\n`);
+	});
+
+	it("ends with a focus-channel tip when there is one", () => {
+		const tip = focusTip({ name: "launches", briefings: 4, useful: 0 });
+		expect(tip).toBe('Tip: #launches fed 4 of your recent briefings. Reply "focus on #launches" to read it in full every morning.');
+		expect(renderBriefing(typical, { ...ctx, tip }).endsWith(`_${tip}_`)).toBe(true);
+		expect(focusTip({ name: "vibe", briefings: 2, useful: 3 })).toContain("3 items you found useful came from #vibe");
+	});
+
+	it("says when searches failed, so a thin briefing is not taken for a quiet day", () => {
+		const stats = { ...ctx.stats, searches: 18, failedSearches: 3 };
+		expect(renderBriefing(typical, { ...ctx, stats })).toContain("3 of 18 searches failed, so coverage is partial.");
+		expect(renderQuiet({ ...ctx, stats })).toContain("3 of 18 searches failed, so coverage is partial.");
+		expect(renderBriefing(typical, ctx)).not.toContain("coverage is partial");
 	});
 });
 
