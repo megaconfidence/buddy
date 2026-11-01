@@ -35,6 +35,22 @@ Probed on 2026-09-17 against `MistralAI-ConnectorsGateway 3.4.4` at
 tool. Nothing can push a Slack message into the Worker. This single constraint shapes
 the whole design.
 
+### Probed 2026-11-01, for the digest
+
+Probed against the live gateway with the real parsers, printing structure only. The
+gateway's tool names match Slack's own MCP server, whose published rate limits apply.
+
+| Fact | Detail |
+| --- | --- |
+| Send format | `slack_send_message` describes its input as standard Markdown (`**bold**`, `_italic_`, links, lists) and caps a message at 5,000 characters. Slack's `*bold*` renders as italics. |
+| Previews | The only preview switch is `unfurl_app_links`, for app links such as GitHub. Nothing turns off previews of Slack message links; the owner accepts them to keep sources inline. |
+| Search pagination | The cursor arrives in prose, in `pagination_info`: "For the next page of results use cursor `…`". Page two returned older results with no overlap. |
+| Enterprise Grid | Permalinks have a four-label host, `<org>.<subdomain>.slack.com`; host checks must allow more than one label before `slack.com`. |
+| Thread signatures | Times render in the owner's zone, and both `GMT` and `BST` occur; all parsed. |
+| Search is scarce | Roughly 10 searches a minute per user, every page counted, with daily limits for sustained use. |
+| Reads are cheap | `slack_read_channel` and `slack_read_thread` are Tier 3, 50+ a minute; a thread read returns up to 1,000 messages. |
+| Model | `glm-5-2` accepted both structured-output schemas. A 24-hour Sunday window ran end to end in 18 s: 9 searches, 6 thread reads, 2 model calls. |
+
 ## Shape
 
 ```
@@ -49,11 +65,13 @@ Worker
     ├── onStart()           addMcpServer("slack", gateway, { transport: { headers } })
     ├── getTools()          12 read-only MCP tools + watchlist tools
     ├── schedule(n)         pollInbox, re-armed each tick ── inbound conversation
-    ├── getScheduledTasks() dailyDigest ── handler starts the sweep fiber
-    └── SQLite              sent_ledger · seen_items · watchlist · digest_runs · cursor
+    ├── getScheduledTasks() dailyDigest ── handler runs the digest
+    └── SQLite              sent_ledger · briefed_threads · briefing_items · watchlist
+                            focus_channels · preferences · digest_runs · cursors
                                    │
                                    ▼
-        sweep fiber      plan → retrieve → dedupe → rank → synthesize → deliver
+        digest      collect conversations → read threads → findings (map)
+                    → briefing (reduce) → one message, sources linked inline
 ```
 
 The poller uses the base Agent `schedule(seconds)` re-armed at the end of every tick,
@@ -218,6 +236,14 @@ one it handled and calls `slack_read_thread` only when it has actually advanced.
 Polling therefore stays at one call per tick, with a second call only on a real reply
 rather than on every tick of an open conversation.
 
+Only parents inside the read window carry that annotation, and the window starts at the
+cursor, which moves past the briefing as soon as anything newer is posted. The read
+therefore reaches back to the latest briefing for 36 hours (`pollReadOldest()`), so "more
+on 3" typed in the briefing's thread is still seen the next afternoon. New top-level
+input is still decided by the cursor alone. Threads are filtered by a changed signature
+before the three-per-tick cap, so quiet threads in the wider window cannot crowd out
+the one that just moved.
+
 **Perceived latency is what to optimize.** The `eyes` reaction lands within a tick and
 tells you the agent heard you. A ten-second acknowledgment reads as responsive; ten
 seconds of silence does not.
@@ -225,73 +251,135 @@ seconds of silence does not.
 ## Daily briefing
 
 A `getScheduledTasks()` handler task fires weekdays at 08:30 Europe/London, matching the
-owner's Slack timezone, and starts the sweep keyed by the task's `idempotencyKey`.
+owner's Slack timezone, and runs the digest keyed by the task's `idempotencyKey`.
 
-The sweep runs as a durable fiber inside the agent (`startFiber()`), not as a Workflow.
-A Workflow would add a class, a binding, and cross-boundary state access by RPC in
-exchange for step-level retry that `this.retry()` already provides for eight searches
-and one synthesis call. Promote it to a Workflow if the sweep grows more steps or needs
-long waits; do not start there.
-
-Retrieval is search, never exhaustive reading. Budget: at most 8 searches and 2 thread
-expansions per run.
-
-| Pass | Query |
-| --- | --- |
-| Mentions | `keywords: ["<@U0BUM44636U>"]` since the last digest — always ranked first |
-| Watchlist | one query per active topic (OCR, Vibe, Le Chat, …) |
-| Upcoming | `launch`, `ship`, `GA`, `roadmap`, `beta` |
-| Content | `blog`, `talk`, `demo`, `conference`, `cookbook` |
-
-Results are deduplicated on `channel_id:message_ts` against `seen_items`, so a thread
-that runs for three days does not resurface three times.
-
-Sections delivered:
+**Digest, not triage.** The first design searched for keywords and asked the model to
+sort each matching message into a section, then posted one message per item. It
+produced a thread of 15 to 20 fragments with no overview, each item one message read
+out of its conversation. The digest now follows changelog-buddy's pipeline instead:
+collect evidence deterministically, have the model evaluate it in batches, synthesise
+one briefing from the results, and render one artifact. Slack evidence is
+conversational rather than a stream of discrete change events, so the unit is the
+conversation: a thread, or a top-level message that started none.
 
 ```
-Needs you              direct mentions and unanswered asks
-Upcoming               tagged confirmed | tentative | inferred
-Content opportunities  audience · format · angle · next step
-Radar                  broader DevRel chatter
+collect    searches find where things happen; threads are then read in full
+filter     drop what the owner already answered, or what was briefed and has not moved
+map        model reads conversations in batches → findings (one fact each, cited)
+reduce     model writes the briefing from all findings, merging stories across channels
+finalise   ids checked against our records, permalinks attached, mentions guaranteed
+render     one numbered message, each item linking its sources
 ```
 
-The briefing is posted as a header at top level with **one message per item** threaded
-beneath it. A single blob could only ever collect one reaction for the whole day, which
-is too coarse to steer anything.
+The digest runs inside the scheduled task rather than as a Workflow. A run is now a
+few minutes: about 10 searches, up to 8 focus-channel reads, up to 25 thread reads,
+and three to six model calls. The task's retry reruns the whole thing, which is
+acceptable once a day. Promote it to a Workflow if a run needs step-level checkpoints.
 
-The model returns structured items citing a `SOURCE_ID` and never a URL; the app
-attaches the permalink from its own record of the hit. An invented or mismatched link
-is therefore not expressible, rather than caught after the fact.
+### Collect
+
+Search is the scarce call, so it is spent on discovery. Thread reads are cheap, so
+they are spent on depth.
+
+| Pass | Calls | Purpose |
+| --- | --- | --- |
+| Mentions | up to 2 pages | `<@U0BUM44636U>` since the window opened, always ranked first |
+| Watchlist | 1 per topic, up to 4 | OCR, Vibe, and anything promoted by feedback |
+| Signal pools | the rest of the 8 slots | `launch·roadmap·shipping·GA·beta·rollout` and `blog·talk·demo·webinar·cookbook·tutorial`, rotated daily |
+| Owner posts | 1 | `from:<@owner>`: what the owner has answered, and threads where someone answered them |
+| Focus channels | 1 read each, up to 8 | read in full instead of sampled; optional, managed in conversation |
+| Thread reads | up to 25 | the highest-ranked conversations, read whole |
+
+Hits are grouped by thread, using the permalink's `thread_ts`, so three hits from one
+launch thread become one conversation rather than three items. The best-ranked
+conversations are then read in full: a keyword hit is one message, but the date, the
+decision and the ask are usually in the replies. When a thread read and a search hit
+disagree about a message, the thread's fuller text wins.
+
+Ranking puts mentions first, then threads where someone replied after the owner's last
+post, watchlist topics, focus channels, signal terms, and thread size. At most 60
+conversations reach the model.
+
+### Map and reduce
+
+The reader sees conversations in batches of about 32,000 characters, with the owner's
+messages labelled and anything older than the window, or already briefed, marked
+`[earlier]` as context. It returns findings: a self-contained fact with a kind (`ask`,
+`shipped`, `planned`, `decision`, `feedback`, `event`, `content`), the timing as stated,
+a certainty, whether it concerns the owner, and two 0–100 scores, DevRel value and
+content value. A failed batch costs only its own conversations.
+
+The editor sees every finding, the items briefed in the last five days, and the learned
+preferences. It writes the briefing:
+
+```
+TL;DR                one or two sentences: the biggest development, the best content play
+Needs you            asks, mentions and replies awaiting the owner
+What's new           what shipped, changed, was decided, or moved on the roadmap
+Opportunities        launches needing support, events and CFPs, pain points, content requests
+Content ideas        up to three: working title, format, hook, why now, effort
+```
+
+It is told to merge the same story across channels, to say what changed rather than
+repeat a recent item, and never to propose publishing unannounced plans before launch.
+If the editor call fails, a plain briefing is built from the findings, so a model
+outage costs the polish, not the briefing.
+
+### Delivery
+
+The briefing is **one message**, with items numbered across sections so the owner can
+reply about any of them ("more on 3"). The model never supplies a link. It cites
+finding ids, and the application maps them to its own conversation records and
+attaches permalinks from search results or builds them from known ids. An invented or
+mismatched link is therefore not expressible, rather than caught after the fact.
+Model-written text is also stripped of link syntax and URLs, and bare domains are
+defused so Slack cannot auto-link them.
+
+Each item links its sources inline, up to two and one per channel, and a source
+without a valid permalink is named but not linked. A first version put the sources in
+a thread reply to keep Slack's link previews out of the briefing, since the send tool
+cannot turn them off. The owner preferred the links in place, previews and all.
+
+The message is rendered within 4,500 characters, under the 5,000 limit. An Enterprise
+Grid permalink is about 120 characters, so links give way first: one per item instead
+of two. If it is still over, items are dropped from the end of the longest section,
+"Needs you" last, so trimming keeps the briefing balanced. The rest are renumbered, so
+stored numbers always match what was shown, and every source stays reachable through
+"more on N".
+
+A direct mention is never dropped silently. If the editor leaves out a conversation
+that mentions the owner, the finaliser puts it back under Needs you.
 
 ## What it decides to watch
 
-Four inputs, in order of strength:
+Five inputs, in order of strength:
 
 | Input | Role |
 | --- | --- |
-| Owner mention token | always query #1, always ranked first |
+| Owner mention token | always query #1, always ranked first, guaranteed a line |
+| Focus channels | read in full every run; up to 8, managed in conversation |
 | Watchlist | up to 4 topic queries; seeded `OCR`, `Vibe`; editable in conversation |
 | Two signal pools | `launch·roadmap·shipping·GA·beta·rollout`, `blog·talk·demo·webinar·cookbook·tutorial`, rotated daily |
-| The model | drops keyword-match noise at synthesis and assigns sections |
+| The model | reads whole conversations, keeps what a developer advocate needs, writes the briefing |
 
 Keyword retrieval is blunt on purpose — the gateway AND-s keywords with no OR, and each
 query costs one of eight slots. `natural_language_query` is passed on topic and signal
-queries for semantic reranking; whether this account supports it is unconfirmed.
+queries for semantic reranking; whether this account supports it is unconfirmed. Focus
+channels exist for what keywords miss: in a channel like `#launches`, every message
+matters, whatever words it uses.
 
-**Reaction feedback closes the loop.** React `:+1:` or `:-1:` on any briefing item. The
-next run reads those reactions with `slack_get_reactions`, attributes the verdict to the
-query term that surfaced the item, and accumulates a score in `topic_signals`. At +2 a
-term is promoted into a scarce topic slot; at −2 it is dropped from the pools entirely.
-The watchlist therefore moves toward what the owner actually engages with instead of
-staying at whatever it was seeded with.
+**Feedback is a reply.** With one message there is no item to react to, so the owner
+replies with a number instead: "3 useful", "5 noise", "2 done". The agent records the
+verdict with `rate_briefing_item`, which does two things, as in changelog-buddy:
 
-Two details that matter:
+- The item joins a preference profile of liked and disliked examples, plus preferred
+  content formats, that both model passes read on every run.
+- The query terms that surfaced it are scored in `topic_signals`. At +2 a term is
+  promoted into a scarce topic slot; at −2 it is dropped from the pools entirely, so the
+  plan moves toward what the owner engages with.
 
-- Slack canonicalises emoji aliases, so a `thumbsup` reads back as `+1`. Matching the
-  alias would silently never fire.
-- Harvesting is deferred a full day and each item is read exactly once, which bounds the
-  cost at one call per item. A reaction added later than that is missed — the price of
-  not re-reading every past item forever.
+Verdicts are captured as they are given, not harvested a day later, and they work on
+any item, including ones the owner never opened.
 
 **Scope is channels only.** `channel_types=public_channel,private_channel`, never the
 `im,mpim` default. DMs and group DMs stay out of the sweep and therefore out of model
@@ -300,8 +388,8 @@ context.
 **Quiet days get one line**, not silence:
 
 ```
-Daily briefing — nothing worth surfacing.
-Scanned 7 messages since Thu 22:37.
+Morning briefing · Fri 18 Sept — nothing worth surfacing.
+Read 7 messages across 3 channels since Thu 22:37.
 ```
 
 Silence was the original choice and it failed in practice: a correct, on-time, empty run
@@ -314,30 +402,43 @@ report its own run history when asked.
 
 **The window has an 18-hour floor.** Anchoring `since` purely on the previous run let any
 run consume the next one's window — a manual test at 22:37 left the 08:30 briefing with
-7 messages instead of 63. `seen_items` is what prevents repeats, so the window only has
-to be wide enough, not exact.
+7 messages instead of 63. `briefed_threads` is what prevents repeats, so the window only
+has to be wide enough, not exact.
+
+**Repeats are tracked per thread, not per message.** Each conversation behind a
+briefing item is recorded with its newest message. It is skipped until something newer
+arrives; then it comes back with the briefed part marked as context, and the editor is
+told what was said before, so a three-day launch thread reads as a sequence of updates
+rather than the same item three times.
 
 **Already-read messages are approximated by engagement.** The gateway exposes no Slack
-read state: no `last_read`, and search ignores `is:unread`. The sweep therefore drops
-hits the owner wrote, and hits in a thread where the owner posted at or after them,
-found with one extra `from:<@owner>` search over the same window. Replies that arrive
-after the owner's last post in a thread are kept. Messages read without replying cannot
-be detected. The drop count is recorded as `engaged=` in `digest_runs.note`.
+read state: no `last_read`, and search ignores `is:unread`. A conversation is dropped
+when the owner posted after everyone else in it, judged from the thread read, or from
+one extra `from:<@owner>` search over the same window when the thread was not read.
+Replies that arrive after the owner's last post are kept and ranked up: someone is
+waiting on them. Messages read without replying cannot be detected. The drop count is
+recorded as `engaged=` in `digest_runs.note`.
 
 ## State
 
-All state lives in the agent's Durable Object SQLite. The Workflow reads and writes it
-by RPC so there is one source of truth and no D1 binding.
+All state lives in the agent's Durable Object SQLite, with no D1 binding. No Slack
+message text is stored: the digest reads conversations in memory during a run. What
+persists is what the model wrote, thread keys and timestamps, and preferences.
 
 | Table | Holds |
 | --- | --- |
-| `sent_ledger` | timestamp of every agent-sent message; the in-thread loop guard. Pruned with its thread |
-| `seen_items` | `channel_id:message_ts` hashes already briefed; pruned at 30 days |
+| `sent_ledger` | timestamp of every agent-sent message; the in-thread loop guard. Pruned at 30 days |
+| `briefing_items` | each numbered item delivered, with its sources and any verdict; what "more on 3" resolves against. Pruned at 60 days |
+| `briefed_threads` | conversation key → newest message ts when briefed; pruned at 30 days |
 | `watchlist` | tracked topics and aliases, editable in conversation |
-| `digest_runs` | run ledger and delivery outcome |
-| `digest_items` | posted item → the query term and channel that produced it |
-| `topic_signals` | accumulated positive/negative reaction score per term |
-| `cursors` | poll watermarks, thread signatures, last activity and digest times |
+| `focus_channels` | channels read in full every run, editable in conversation |
+| `preferences` | liked and disliked examples and preferred formats, fed to both model passes |
+| `topic_signals` | accumulated useful/noise score per query term |
+| `digest_runs` | run ledger and delivery outcome, with per-stage counts |
+| `cursors` | poll watermarks, thread signatures, last activity, digest and briefing times, workspace host |
+
+The earlier `seen_items` and `digest_items` tables are no longer used. They are left in
+place rather than dropped.
 
 ## Configuration
 
@@ -396,12 +497,16 @@ otherwise wait for an alarm:
 | `?reconnect=1` | Drop and re-add the MCP registration. `onStart` only runs on a cold start, so a warm object otherwise keeps a broken connection until eviction. |
 | `?poll=1` | Run a poll immediately instead of waiting for the armed alarm. |
 | `?digest=1[&hours=N]` | Run the sweep now, optionally overriding the lookback window. |
-| `?reset=seen` | Forget what has been briefed, so items can resurface. |
+| `?reset=seen` | Forget which threads have been briefed, so conversations can resurface. |
 
-Every run records `retrieved=… candidates=… surfaced=…` in `digest_runs.note`, so an
-empty briefing says which stage produced nothing. Without those counts "empty" is
-unreadable — it could equally mean a quiet day, a broken search, or a triage that
-rejected everything.
+Every run records `searches=… reads=… messages=… conversations=… engaged=…
+briefed_before=… candidates=… findings=… surfaced=… failed_batches=…` in
+`digest_runs.note`, so an empty briefing says which stage produced nothing. Without
+those counts "empty" is unreadable — it could equally mean a quiet day, a broken
+search, or an editor that rejected everything.
+
+`/health` also lists the focus channels, the learned workspace host, and the item count
+of the latest briefing.
 
 These endpoints are unauthenticated. They only touch the owner's own DM and cannot leak
 data, but anyone who learns the URL can trigger a poll or a sweep. Add a shared secret
@@ -454,8 +559,10 @@ reconsider and usually fall outside the next window anyway.
 
 **Untruncated context degraded triage.** `include_context: true` appends surrounding
 messages to every hit, and 63 untruncated candidates produced a prompt that returned
-zero items where a truncated one returned four. Sources are capped at 700 characters.
-A 1M-token context means input *fits*, not that the model reasons well over it.
+zero items where a truncated one returned four. A 1M-token context means input *fits*,
+not that the model reasons well over it. The digest's answer is the map pass: whole
+conversations, but in batches of about 32,000 characters, each conversation capped at
+6,000 by keeping its root and newest messages.
 
 **Replies were invisible.** Conversational replies were posted as thread replies, which
 Slack does not surface in the main DM pane — and because the agent posts under the
@@ -468,7 +575,11 @@ answering every message. Conversational replies now set `reply_broadcast`.
 - Latency is 10 s mid-conversation, up to 15 min when idle overnight. Never instant.
 - Polling spends MCP calls while idle.
 - Search is a sample, not full channel coverage. Briefings should report partial
-  coverage rather than imply completeness.
+  coverage rather than imply completeness. Focus channels are the exception, up to 8.
+- Sources are linked inline, so Slack may show previews under the briefing; the send
+  tool cannot turn them off. On a heavy day, links drop to one per item before any
+  item is cut.
+- A briefing costs three to six model calls instead of one, plus up to 25 thread reads.
 
 ## Migration path to a bot app
 

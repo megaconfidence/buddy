@@ -39,6 +39,10 @@ export type SearchHit = {
 	time: string | null;
 	permalink: string | null;
 	text: string;
+	/** The gateway marks bot authors with `[BOT]` on the `From:` line. */
+	isBot: boolean;
+	/** Surrounding messages from `include_context`, flattened to `Name: text` lines. */
+	context: string;
 };
 
 const HEADER_INLINE = /^=== Message from (.+?) \(([^()]+)\) at (.+?) ===\s*$/;
@@ -147,9 +151,12 @@ export function parseConversation(text: string): SlackMessage[] {
 const RESULT_SPLIT = /^### Result \d+ of \d+\s*$/m;
 const HIT_CHANNEL = /^Channel:\s*(\S+)\s*\(ID: ([^)]+)\)/m;
 const HIT_FROM = /^From:\s*(.*?)\s*\(ID: ([^)]+)\)/m;
+const HIT_FROM_LINE = /^From:.*$/m;
 const HIT_TIME = /^Time:\s*(.+)$/m;
 const HIT_TS = /^Message_ts:\s*(\d+\.\d+)/m;
 const HIT_PERMALINK = /^Permalink:\s*\[link\]\(([^)]+)\)/m;
+const CONTEXT_START = /\n(?:Context before:|Context after:)/;
+const CONTEXT_FROM = /^- From:\s*(.*?)\s*\(ID: [^)]+\)\s*$/;
 
 /** Parse the `results` field of a `slack_search_*` response. */
 export function parseSearchResults(text: string): SearchHit[] {
@@ -183,35 +190,138 @@ export function parseSearchResults(text: string): SearchHit[] {
 			time: time?.[1]?.trim() ?? null,
 			permalink: permalink?.[1]?.trim() ?? null,
 			text: body,
+			isBot: /\[BOT\]/.test(HIT_FROM_LINE.exec(block)?.[0] ?? ""),
+			context: parseContext(block),
 		});
 	}
 
 	return hits;
 }
 
-export type Reaction = { emoji: string; count: number; userIds: string[] };
+/**
+ * Flatten a hit's `Context before:` / `Context after:` blocks into
+ * `Name: text` lines. Timestamps and user ids are dropped: the context is
+ * only ever shown to the model, never linked.
+ */
+function parseContext(block: string): string {
+	const start = block.search(CONTEXT_START);
+	if (start === -1) return "";
+
+	const entries: string[] = [];
+	for (const raw of block.slice(start).split("\n")) {
+		const line = raw.trim();
+		if (!line || line === "---") continue;
+		if (/^Context (?:before|after):$/i.test(line) || /^Message_ts:/i.test(line)) continue;
+
+		const from = CONTEXT_FROM.exec(line);
+		if (from) {
+			entries.push(`${cleanAuthorName(from[1]) ?? "Someone"}:`);
+		} else if (entries.length === 0) {
+			entries.push(line);
+		} else {
+			entries[entries.length - 1] += ` ${line}`;
+		}
+	}
+	return entries.join("\n");
+}
+
+/** `Ada Lovelace <ada@example.com>` → `Ada Lovelace`. Emails never reach the model. */
+export function cleanAuthorName(name: string | null | undefined): string | null {
+	const cleaned = (name ?? "").replace(/<[^>]*>/g, "").trim();
+	return cleaned || null;
+}
 
 /**
- * `:+1: × 1 — confidence (U0BUM44636U)`
+ * Split a search response envelope into the rendered results and the
+ * pagination cursor.
  *
- * Slack canonicalises emoji aliases, so a reaction added as `thumbsup` reads
- * back as `+1`. Callers must compare against normalised names.
+ * The gateway puts the cursor in prose, in `pagination_info` (verified live
+ * 2026-11-01). The other usual places are checked too, in case that changes;
+ * a missing cursor only means the caller stops after one page.
  */
-const REACTION_LINE = /^:([^:]+):\s*×\s*(\d+)\s*—\s*(.*)$/;
-const REACTION_USER = /\(([^)]+)\)/g;
+export function parseSearchEnvelope(raw: string): {
+	results: string;
+	nextCursor: string | null;
+} {
+	let results = raw;
+	let cursor: string | null = null;
+	try {
+		const envelope = JSON.parse(raw) as Record<string, unknown>;
+		if (typeof envelope.results === "string") results = envelope.results;
 
-export function parseReactions(text: string): Reaction[] {
-	const out: Reaction[] = [];
-
-	for (const raw of text.replace(/\r\n/g, "\n").split("\n")) {
-		const match = REACTION_LINE.exec(raw.trim());
-		if (!match) continue;
-
-		const userIds = [...match[3].matchAll(REACTION_USER)].map((m) => m[1].trim());
-		out.push({ emoji: match[1], count: Number(match[2]), userIds });
+		const metadata = envelope.response_metadata as Record<string, unknown> | undefined;
+		for (const candidate of [envelope.next_cursor, envelope.nextCursor, envelope.cursor, metadata?.next_cursor]) {
+			if (typeof candidate === "string" && candidate.trim()) {
+				cursor = candidate.trim();
+				break;
+			}
+		}
+		if (!cursor) {
+			for (const [key, value] of Object.entries(envelope)) {
+				if (key === "results" || typeof value !== "string") continue;
+				cursor = cursorFromText(value, true);
+				if (cursor) break;
+			}
+		}
+	} catch {
+		// Not JSON: the whole payload is the rendered text.
 	}
+	return { results, nextCursor: cursor ?? cursorFromText(results) };
+}
 
-	return out;
+/**
+ * The gateway's `pagination_info` reads "For the next page of results use
+ * cursor `<cursor>`" (observed live, 2026-11-01). A field other than the
+ * results is metadata, so prose there can be trusted.
+ */
+const CURSOR_IN_PROSE = /\bcursor\b[^`\n]*`([^`\s]{4,})`/i;
+
+/** In the results text only a line that is nothing but a cursor label counts, so message bodies cannot. */
+const CURSOR_LINE = /^\W*next[_ ]?cursor\W*[:=]\s*`?([A-Za-z0-9+/=_-]{6,})`?\s*$/im;
+
+function cursorFromText(text: string, metadata = false): string | null {
+	return (metadata ? CURSOR_IN_PROSE.exec(text)?.[1] : undefined) ?? CURSOR_LINE.exec(text)?.[1] ?? null;
+}
+
+/** UTC offsets in minutes for the abbreviations the gateway renders. */
+const ZONE_OFFSETS: Record<string, number> = {
+	UTC: 0,
+	GMT: 0,
+	BST: 60,
+	CET: 60,
+	CEST: 120,
+	EET: 120,
+	EEST: 180,
+	EST: -300,
+	EDT: -240,
+	CST: -360,
+	CDT: -300,
+	MST: -420,
+	MDT: -360,
+	PST: -480,
+	PDT: -420,
+};
+
+const LOCAL_TIME = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?\s*([A-Z]{2,5}|[+-]\d{2}:?\d{2})$/;
+
+/**
+ * Parse a gateway-rendered time such as `2026-09-17 20:47:14 BST` to epoch
+ * milliseconds. Returns null for anything ambiguous: a guessed offset could
+ * silently skip or resurrect a thread.
+ */
+export function parseSlackLocalTime(value: string | null | undefined): number | null {
+	const match = LOCAL_TIME.exec((value ?? "").trim());
+	if (!match) return null;
+
+	const [, y, mo, d, h, mi, s, zone] = match;
+	let offset: number | undefined = ZONE_OFFSETS[zone];
+	if (offset === undefined) {
+		const numeric = /^([+-])(\d{2}):?(\d{2})$/.exec(zone);
+		if (!numeric) return null;
+		offset = (numeric[1] === "-" ? -1 : 1) * (Number(numeric[2]) * 60 + Number(numeric[3]));
+	}
+	const utc = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s ?? "0"));
+	return utc - offset * 60_000;
 }
 
 /**
@@ -228,4 +338,45 @@ export function permalinkMatches(
 	if (!permalink || !channelId) return false;
 	const compact = ts.replace(".", "");
 	return permalink.includes(`/${channelId}/`) && permalink.includes(`p${compact}`);
+}
+
+/**
+ * A Slack workspace host: `acme.slack.com`, or on Enterprise Grid
+ * `acme.enterprise.slack.com`. Mistral's workspace is the latter.
+ */
+const SLACK_HOST = /^(?:[a-z0-9-]+\.)+slack\.com$/i;
+
+const SLACK_PERMALINK = /^https:\/\/(?:[a-z0-9-]+\.)+slack\.com\/archives\/[A-Z0-9]+\/p\d+(?:\?[\w=&.%-]*)?$/i;
+
+/**
+ * Whether a URL is a Slack message permalink and nothing else. Checked again
+ * just before a link is rendered, so nothing but a permalink from our own
+ * records can become a link, and nothing in it can break Markdown link syntax.
+ */
+export function isSlackPermalink(url: string | null | undefined): url is string {
+	return typeof url === "string" && SLACK_PERMALINK.test(url);
+}
+
+/** The workspace host of a Slack permalink, e.g. `acme.enterprise.slack.com`. */
+export function workspaceHostOf(permalink: string | null): string | null {
+	if (!permalink) return null;
+	try {
+		const url = new URL(permalink);
+		return url.protocol === "https:" && SLACK_HOST.test(url.host) ? url.host : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Build a permalink from ids the application already holds.
+ *
+ * Channel reads return no permalinks, so focus-channel conversations need
+ * one constructed. Every input comes from our own records, never from the
+ * model, which keeps the "the model never supplies a link" property.
+ */
+export function buildPermalink(host: string | null, channelId: string, ts: string): string | null {
+	if (!host || !SLACK_HOST.test(host)) return null;
+	if (!/^[A-Z0-9]+$/.test(channelId) || !/^\d+\.\d+$/.test(ts)) return null;
+	return `https://${host}/archives/${channelId}/p${ts.replace(".", "")}`;
 }

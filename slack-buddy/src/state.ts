@@ -1,8 +1,15 @@
+import type { BriefingItem } from "./digest/types";
+import { DEFAULT_PROFILE, type PreferenceProfile, type Verdict } from "./feedback";
+
 /**
  * Durable Object SQLite schema and accessors.
  *
  * Single source of truth for the agent. There is no D1 binding; the sweep runs
  * in-agent and writes here directly.
+ *
+ * No Slack message text is stored. The digest reads conversations in memory
+ * during a run; what persists is the briefing the model wrote, thread keys and
+ * timestamps for de-duplication, and the owner's preferences.
  */
 
 export type Sql = <T = Record<string, string | number | boolean | null>>(
@@ -18,6 +25,12 @@ export const LAST_MANUAL_BRIEFING = "last_manual_briefing_at";
 export const RATE_LIMITED_UNTIL = "rate_limited_until";
 /** Epoch ms until which the primary model is assumed unavailable. */
 export const MODEL_FALLBACK_UNTIL = "model_fallback_until";
+/** Run id of the latest delivered briefing; item numbers in conversation refer to it. */
+export const LAST_BRIEFING_RUN = "last_briefing_run";
+/** Slack ts of the latest briefing message, so the poller keeps watching its thread. */
+export const LAST_BRIEFING_TS = "last_briefing_ts";
+/** Slack workspace host learned from search permalinks, for building links. */
+export const WORKSPACE_HOST = "workspace_host";
 
 /**
  * Opaque `Thread: N replies (latest: ...)` value, used only to detect change.
@@ -28,10 +41,17 @@ export const threadSignatureKey = (parentTs: string) => `threadsig:${parentTs}`;
 /** Highest reply timestamp already handled in a thread. */
 export const threadWatermarkKey = (parentTs: string) => `threadwm:${parentTs}`;
 
-const SEEN_ITEM_TTL_DAYS = 30;
 const SENT_LEDGER_TTL_DAYS = 30;
+const BRIEFED_THREAD_TTL_DAYS = 30;
+const BRIEFING_ITEM_TTL_DAYS = 60;
 
 export type DigestStatus = "ok" | "empty" | "failed";
+
+export type StoredBriefingItem = BriefingItem & {
+	runId: string;
+	verdict: Verdict | null;
+	createdAt: number;
+};
 
 export class Store {
 	constructor(private readonly sql: Sql) {}
@@ -41,12 +61,6 @@ export class Store {
 			CREATE TABLE IF NOT EXISTS sent_ledger (
 				ts TEXT PRIMARY KEY,
 				created_at INTEGER NOT NULL
-			)
-		`;
-		this.sql`
-			CREATE TABLE IF NOT EXISTS seen_items (
-				key TEXT PRIMARY KEY,
-				first_seen INTEGER NOT NULL
 			)
 		`;
 		this.sql`
@@ -62,19 +76,6 @@ export class Store {
 				aliases TEXT NOT NULL DEFAULT '',
 				active INTEGER NOT NULL DEFAULT 1,
 				created_at INTEGER NOT NULL
-			)
-		`;
-		// One row per briefing item posted, so a reaction on that message can
-		// be traced back to the query term and channel that produced it.
-		this.sql`
-			CREATE TABLE IF NOT EXISTS digest_items (
-				ts TEXT PRIMARY KEY,
-				run_id TEXT NOT NULL,
-				source_key TEXT NOT NULL,
-				term TEXT NOT NULL,
-				channel TEXT NOT NULL DEFAULT '',
-				posted_at INTEGER NOT NULL,
-				harvested INTEGER NOT NULL DEFAULT 0
 			)
 		`;
 		this.sql`
@@ -93,6 +94,45 @@ export class Store {
 				status TEXT,
 				item_count INTEGER NOT NULL DEFAULT 0,
 				note TEXT
+			)
+		`;
+		// One row per numbered item of a delivered briefing. This is what "more
+		// on 3" resolves against, and what the editor reads to avoid repeating
+		// itself.
+		this.sql`
+			CREATE TABLE IF NOT EXISTS briefing_items (
+				run_id TEXT NOT NULL,
+				number INTEGER NOT NULL,
+				section TEXT NOT NULL,
+				text TEXT NOT NULL,
+				item_json TEXT NOT NULL,
+				verdict TEXT,
+				created_at INTEGER NOT NULL,
+				PRIMARY KEY (run_id, number)
+			)
+		`;
+		// Thread-level de-duplication: a conversation that was briefed is skipped
+		// until it gets a message newer than `latest_ts`.
+		this.sql`
+			CREATE TABLE IF NOT EXISTS briefed_threads (
+				key TEXT PRIMARY KEY,
+				latest_ts TEXT NOT NULL,
+				headline TEXT NOT NULL,
+				briefed_at INTEGER NOT NULL
+			)
+		`;
+		this.sql`
+			CREATE TABLE IF NOT EXISTS focus_channels (
+				channel_id TEXT PRIMARY KEY,
+				name TEXT NOT NULL DEFAULT '',
+				added_at INTEGER NOT NULL
+			)
+		`;
+		this.sql`
+			CREATE TABLE IF NOT EXISTS preferences (
+				id TEXT PRIMARY KEY,
+				profile_json TEXT NOT NULL,
+				updated_at INTEGER NOT NULL
 			)
 		`;
 	}
@@ -135,25 +175,12 @@ export class Store {
 		`;
 	}
 
-	// ----------------------------------------------------------- seen items
-
-	hasSeen(key: string): boolean {
-		return this.sql<{ key: string }>`
-			SELECT key FROM seen_items WHERE key = ${key} LIMIT 1
-		`.length > 0;
+	workspaceHost(): string | null {
+		return this.getCursor(WORKSPACE_HOST);
 	}
 
-	/** Maintenance: forget what has been briefed, so items can resurface. */
-	clearSeen(): void {
-		this.sql`DELETE FROM seen_items`;
-	}
-
-	markSeen(keys: string[], now = Date.now()): void {
-		for (const key of keys) {
-			this.sql`
-				INSERT OR IGNORE INTO seen_items (key, first_seen) VALUES (${key}, ${now})
-			`;
-		}
+	setWorkspaceHost(host: string): void {
+		this.setCursor(WORKSPACE_HOST, host);
 	}
 
 	// ------------------------------------------------------------ watchlist
@@ -174,6 +201,29 @@ export class Store {
 
 	removeTopic(topic: string): void {
 		this.sql`UPDATE watchlist SET active = 0 WHERE topic = ${topic}`;
+	}
+
+	// ------------------------------------------------------- focus channels
+
+	focusChannels(): Array<{ channelId: string; name: string }> {
+		return this.sql<{ channel_id: string; name: string }>`
+			SELECT channel_id, name FROM focus_channels ORDER BY added_at
+		`.map((r) => ({ channelId: r.channel_id, name: r.name }));
+	}
+
+	addFocusChannel(channelId: string, name: string, now = Date.now()): void {
+		this.sql`
+			INSERT INTO focus_channels (channel_id, name, added_at) VALUES (${channelId}, ${name}, ${now})
+			ON CONFLICT(channel_id) DO UPDATE SET name = CASE WHEN excluded.name = '' THEN focus_channels.name ELSE excluded.name END
+		`;
+	}
+
+	/** Remove by id or by name. Returns whether anything was removed. */
+	removeFocusChannel(idOrName: string): boolean {
+		const target = idOrName.replace(/^#/, "");
+		const before = this.focusChannels().length;
+		this.sql`DELETE FROM focus_channels WHERE channel_id = ${target} OR name = ${target}`;
+		return this.focusChannels().length < before;
 	}
 
 	// ---------------------------------------------------------- digest runs
@@ -219,38 +269,102 @@ export class Store {
 		` as never;
 	}
 
-	// --------------------------------------------------- items and signals
+	// ------------------------------------------------------ briefing items
 
-	recordDigestItem(item: {
-		ts: string;
-		runId: string;
-		sourceKey: string;
-		term: string;
-		channel: string;
-		now?: number;
-	}): void {
+	saveBriefing(runId: string, items: BriefingItem[], now = Date.now()): void {
+		for (const item of items) {
+			this.sql`
+				INSERT OR REPLACE INTO briefing_items (run_id, number, section, text, item_json, created_at)
+				VALUES (${runId}, ${item.number}, ${item.section}, ${item.text}, ${JSON.stringify(item)}, ${now})
+			`;
+		}
+	}
+
+	private hydrate(row: { run_id: string; item_json: string; verdict: string | null; created_at: number }): StoredBriefingItem {
+		return {
+			...(JSON.parse(row.item_json) as BriefingItem),
+			runId: row.run_id,
+			verdict: row.verdict as Verdict | null,
+			createdAt: row.created_at,
+		};
+	}
+
+	/** Items of the latest delivered briefing, in display order. */
+	latestBriefingItems(): StoredBriefingItem[] {
+		const runId = this.getCursor(LAST_BRIEFING_RUN);
+		if (!runId) return [];
+		return this.sql<{ run_id: string; item_json: string; verdict: string | null; created_at: number }>`
+			SELECT run_id, item_json, verdict, created_at FROM briefing_items
+			WHERE run_id = ${runId} ORDER BY number
+		`.map((row) => this.hydrate(row));
+	}
+
+	briefingItem(number: number): StoredBriefingItem | null {
+		return this.latestBriefingItems().find((item) => item.number === number) ?? null;
+	}
+
+	setVerdict(runId: string, number: number, verdict: Verdict): void {
+		this.sql`UPDATE briefing_items SET verdict = ${verdict} WHERE run_id = ${runId} AND number = ${number}`;
+	}
+
+	/** What recent briefings said, so the editor reports changes rather than repeats. */
+	recentBriefingItems(sinceMs: number, limit = 40): Array<{ section: string; text: string; createdAt: number }> {
+		return this.sql<{ section: string; text: string; created_at: number }>`
+			SELECT section, text, created_at FROM briefing_items
+			WHERE created_at >= ${sinceMs} ORDER BY created_at DESC, number LIMIT ${limit}
+		`.map((r) => ({ section: r.section, text: r.text, createdAt: r.created_at }));
+	}
+
+	// ----------------------------------------------------- briefed threads
+
+	markBriefed(threads: Array<{ key: string; latestTs: string; headline: string }>, now = Date.now()): void {
+		for (const t of threads) {
+			this.sql`
+				INSERT INTO briefed_threads (key, latest_ts, headline, briefed_at)
+				VALUES (${t.key}, ${t.latestTs}, ${t.headline}, ${now})
+				ON CONFLICT(key) DO UPDATE SET
+					latest_ts = excluded.latest_ts,
+					headline = excluded.headline,
+					briefed_at = excluded.briefed_at
+			`;
+		}
+	}
+
+	/** Newest message ts a thread had when it was last briefed, in epoch seconds. */
+	briefedLatest(key: string): number | undefined {
+		const row = this.sql<{ latest_ts: string }>`
+			SELECT latest_ts FROM briefed_threads WHERE key = ${key} LIMIT 1
+		`[0];
+		return row ? Number(row.latest_ts) : undefined;
+	}
+
+	/** Maintenance: forget what has been briefed, so conversations can resurface. */
+	clearBriefed(): void {
+		this.sql`DELETE FROM briefed_threads`;
+	}
+
+	// --------------------------------------------------------- preferences
+
+	preferenceProfile(): PreferenceProfile {
+		const row = this.sql<{ profile_json: string }>`
+			SELECT profile_json FROM preferences WHERE id = 'default' LIMIT 1
+		`[0];
+		if (!row) return structuredClone(DEFAULT_PROFILE);
+		try {
+			return { ...structuredClone(DEFAULT_PROFILE), ...(JSON.parse(row.profile_json) as PreferenceProfile) };
+		} catch {
+			return structuredClone(DEFAULT_PROFILE);
+		}
+	}
+
+	savePreferenceProfile(profile: PreferenceProfile, now = Date.now()): void {
 		this.sql`
-			INSERT OR IGNORE INTO digest_items (ts, run_id, source_key, term, channel, posted_at)
-			VALUES (${item.ts}, ${item.runId}, ${item.sourceKey}, ${item.term}, ${item.channel}, ${item.now ?? Date.now()})
+			INSERT INTO preferences (id, profile_json, updated_at) VALUES ('default', ${JSON.stringify(profile)}, ${now})
+			ON CONFLICT(id) DO UPDATE SET profile_json = excluded.profile_json, updated_at = excluded.updated_at
 		`;
 	}
 
-	/**
-	 * Items still awaiting a reaction check.
-	 *
-	 * Harvesting is deferred to the next run so the owner has a full day to
-	 * react. Each item is read at most once, which bounds the extra calls.
-	 */
-	pendingFeedback(limit = 20): Array<{ ts: string; term: string; channel: string }> {
-		return this.sql`
-			SELECT ts, term, channel FROM digest_items
-			WHERE harvested = 0 ORDER BY posted_at LIMIT ${limit}
-		` as never;
-	}
-
-	markHarvested(ts: string): void {
-		this.sql`UPDATE digest_items SET harvested = 1 WHERE ts = ${ts}`;
-	}
+	// ------------------------------------------------------- topic signals
 
 	bumpSignal(term: string, verdict: "useful" | "noise", now = Date.now()): void {
 		const positive = verdict === "useful" ? 1 : 0;
@@ -275,9 +389,9 @@ export class Store {
 	// ------------------------------------------------------------- pruning
 
 	prune(now = Date.now()): void {
-		const seenCutoff = now - SEEN_ITEM_TTL_DAYS * 86_400_000;
-		const sentCutoff = now - SENT_LEDGER_TTL_DAYS * 86_400_000;
-		this.sql`DELETE FROM seen_items WHERE first_seen < ${seenCutoff}`;
-		this.sql`DELETE FROM sent_ledger WHERE created_at < ${sentCutoff}`;
+		const day = 86_400_000;
+		this.sql`DELETE FROM sent_ledger WHERE created_at < ${now - SENT_LEDGER_TTL_DAYS * day}`;
+		this.sql`DELETE FROM briefed_threads WHERE briefed_at < ${now - BRIEFED_THREAD_TTL_DAYS * day}`;
+		this.sql`DELETE FROM briefing_items WHERE created_at < ${now - BRIEFING_ITEM_TTL_DAYS * day}`;
 	}
 }

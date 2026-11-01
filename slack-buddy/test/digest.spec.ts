@@ -2,14 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
 	SEARCH_BUDGET,
 	buildQueryPlan,
-	isEngaged,
 	lastOwnerPosts,
 	runDigest,
 	threadKey,
+	type DigestStore,
 } from "../src/digest";
+import { DEFAULT_PROFILE } from "../src/feedback";
 import type { SlackClient } from "../src/slack/client";
-import type { SearchHit } from "../src/slack/parse";
-import type { Store } from "../src/state";
+import type { SearchHit, SlackMessage } from "../src/slack/parse";
+import { HOST, NOW, SINCE, hit as hitAt, permalink, scriptedModel, slackMessage, ts } from "./helpers";
 
 const OWNER = "U0BUM44636U";
 const now = new Date(Date.UTC(2026, 8, 17, 7, 30));
@@ -158,6 +159,8 @@ function hit(ts: string, authorId: string, threadTs?: string): SearchHit {
 		time: null,
 		permalink: `https://mistralai.slack.com/archives/${CHANNEL}/p${ts.replace(".", "")}${query}`,
 		text: "text",
+		isBot: false,
+		context: "",
 	};
 }
 
@@ -181,42 +184,13 @@ describe("threadKey", () => {
 	});
 });
 
-describe("isEngaged", () => {
-	const ownerPosts = lastOwnerPosts(
-		[
-			hit("1792143600.000000", OWNER, THREAD_ROOT),
-			hit("1792143700.000000", OWNER, THREAD_ROOT),
-		],
-		OWNER,
-	);
-
-	it("drops the owner's own messages", () => {
-		expect(isEngaged(hit("1792000000.000001", OWNER), OWNER, new Map())).toBe(true);
-	});
-
-	it("drops the parent of a thread the owner replied in", () => {
-		expect(isEngaged(hit(THREAD_ROOT, "U1", THREAD_ROOT), OWNER, ownerPosts)).toBe(
-			true,
+describe("lastOwnerPosts", () => {
+	it("keeps the owner's latest post per thread", () => {
+		const posts = lastOwnerPosts(
+			[hit("1792143600.000000", OWNER, THREAD_ROOT), hit("1792143700.000000", OWNER, THREAD_ROOT)],
+			OWNER,
 		);
-	});
-
-	it("drops a reply the owner posted after", () => {
-		expect(
-			isEngaged(hit("1792143650.000000", "U1", THREAD_ROOT), OWNER, ownerPosts),
-		).toBe(true);
-	});
-
-	it("keeps a reply that arrived after the owner's last post", () => {
-		// Someone answering the owner is exactly what the briefing must not hide.
-		expect(
-			isEngaged(hit("1792143800.000000", "U1", THREAD_ROOT), OWNER, ownerPosts),
-		).toBe(false);
-	});
-
-	it("keeps messages in threads the owner never posted in", () => {
-		expect(
-			isEngaged(hit("1792143650.000000", "U1", "1792100000.000000"), OWNER, ownerPosts),
-		).toBe(false);
+		expect(posts.get(`${CHANNEL}:${THREAD_ROOT}`)).toBe(1792143700);
 	});
 
 	it("ignores posts by anyone else when building the owner's history", () => {
@@ -225,75 +199,218 @@ describe("isEngaged", () => {
 	});
 });
 
-describe("runDigest engagement filter", () => {
-	function fakes(opts: { ownerSearch: () => Promise<SearchHit[]>; hits: SearchHit[] }) {
-		const calls: Array<{ keywords: string[]; filters?: string }> = [];
-		const client = {
-			searchJoined: async (args: { keywords: string[]; filters?: string }) => {
-				calls.push(args);
-				return args.filters ? opts.ownerSearch() : opts.hits;
+describe("runDigest", () => {
+	type Search = (args: { keywords: string[]; filters?: string }) => SearchHit[];
+
+	function fakeClient(search: Search, threads: Record<string, SlackMessage[]> = {}) {
+		return {
+			searchJoined: async (args: { keywords: string[]; filters?: string }) => ({ hits: search(args), nextCursor: null }),
+			readChannel: async () => [],
+			readThread: async (channelId: string, rootTs: string) => {
+				const thread = threads[`${channelId}:${rootTs}`];
+				if (!thread) throw new Error("no such thread");
+				return thread;
 			},
-		} as unknown as SlackClient;
-		const store = {
-			activeTopics: () => [],
-			signals: () => [],
-			hasSeen: () => false,
-			isSent: () => false,
-			markSeen: () => {},
-		} as unknown as Store;
-		return { client, store, calls };
+		} as unknown as Pick<SlackClient, "searchJoined" | "readChannel" | "readThread">;
 	}
 
-	const since = new Date(now.getTime() - 18 * 3_600_000);
+	function fakeStore(overrides: Partial<DigestStore> = {}) {
+		let host: string | null = null;
+		const store: DigestStore = {
+			activeTopics: () => ["Vibe"],
+			signals: () => [],
+			focusChannels: () => [],
+			briefedLatest: () => undefined,
+			recentBriefingItems: () => [],
+			preferenceProfile: () => structuredClone(DEFAULT_PROFILE),
+			workspaceHost: () => host,
+			setWorkspaceHost: (h) => {
+				host = h;
+			},
+			...overrides,
+		};
+		return store;
+	}
 
-	it("searches the owner's posts once, over the same window", async () => {
-		const { client, store, calls } = fakes({
-			ownerSearch: async () => [],
-			hits: [],
+	const launchRoot = ts(10);
+	const mentionTs = ts(40);
+	const search: Search = (args) => {
+		if (args.keywords[0] === `<@${OWNER}>`) {
+			return [hitAt(mentionTs, "U7", { channelName: "#devrel", text: `<@${OWNER}> can you review the OCR cookbook draft by Thursday?` })];
+		}
+		if (args.keywords[0] === "Vibe") {
+			return [hitAt(ts(20), "U2", { threadTs: launchRoot, channelName: "#vibe", text: "GA moves to 19 Nov" })];
+		}
+		return [];
+	};
+	const threads = {
+		[`${hitAt(launchRoot, "U1").channelId}:${launchRoot}`]: [
+			slackMessage(launchRoot, "U1", "Vibe 2.0 launch plan, targeting 12 Nov"),
+			slackMessage(ts(20), "U2", "GA moves to 19 Nov, pricing page needs another pass"),
+			slackMessage(ts(25), "U3", "DevRel should have a launch-day demo ready"),
+		],
+	};
+
+	const findings = (prompt: string) => {
+		// The reader sees ids it assigned; find which one holds which thread.
+		const idFor = (needle: string) => {
+			const match = new RegExp(`<conversation id=\\\\"(T\\d+)\\\\"[^>]*>[^<]*${needle}`).exec(prompt);
+			return match?.[1] ?? "T0";
+		};
+		return {
+			findings: [
+				{
+					conversation: idFor("GA moves to 19 Nov"),
+					kind: "planned",
+					summary: "Vibe 2.0 GA moved from 12 to 19 Nov; the pricing page needs another pass.",
+					products: ["Vibe"],
+					when: "19 Nov",
+					certainty: "confirmed",
+					forOwner: false,
+					people: ["Person U2"],
+					devrelValue: 85,
+					contentValue: 80,
+				},
+			],
+		};
+	};
+
+	const draft = {
+		tldr: "Vibe 2.0 GA moved to 19 Nov; a launch-day demo is the strongest play.",
+		needsYou: [],
+		whatsNew: [{ text: "Vibe 2.0 GA moved from 12 to 19 Nov", isUpdate: false, certainty: "confirmed", findings: ["F1"] }],
+		opportunities: [],
+		contentIdeas: [
+			{ title: "Ship a coding agent with Vibe 2.0", format: "video", hook: "Zero to PR in ten minutes", whyNow: "GA on 19 Nov", effort: "medium", findings: ["F1"] },
+		],
+	};
+
+	it("digests conversations into one numbered briefing", async () => {
+		const { model, prompts } = scriptedModel(findings, draft);
+		const result = await runDigest({
+			client: fakeClient(search, threads),
+			store: fakeStore(),
+			model,
+			ownerId: OWNER,
+			timeZone: "Europe/London",
+			since: SINCE,
+			now: NOW,
 		});
-		await runDigest({ client, store, model: null as never, ownerId: OWNER, since, now });
-		const ownerCalls = calls.filter((c) => c.filters);
-		expect(ownerCalls).toHaveLength(1);
-		expect(ownerCalls[0]).toMatchObject({
-			keywords: [],
-			filters: `from:<@${OWNER}>`,
-			after: Math.floor(since.getTime() / 1000).toString(),
-		});
+
+		expect(result.status).toBe("ok");
+		if (result.status !== "ok") return;
+		const { items, tldr } = result.briefing;
+		expect(tldr).toContain("19 Nov");
+		expect(items.map((i) => [i.number, i.section])).toEqual([
+			[1, "needs_you"],
+			[2, "whats_new"],
+			[3, "content_idea"],
+		]);
+
+		// The mention the model never saw a finding for is put back by the guard.
+		expect(items[0].text).toContain("review the OCR cookbook draft");
+		// Sources are ours, not the model's: the verified permalink of the hit,
+		// which opens the thread at the reply that matched.
+		expect(items[1].sources[0].permalink).toBe(permalink(CHANNEL, ts(20), launchRoot));
+		expect(items[1].sources[0].latestTs).toBe(ts(25));
+		expect(items[2].format).toBe("video");
+
+		// The reader saw the whole thread, not just the keyword hit.
+		expect(prompts[0]).toContain("DevRel should have a launch-day demo ready");
+		expect(prompts).toHaveLength(2);
+		expect(result.stats).toMatchObject({ candidates: 2, findings: 1, surfaced: 3 });
 	});
 
-	it("drops engaged hits before triage and counts them", async () => {
-		const { client, store } = fakes({
-			ownerSearch: async () => [hit("1792143700.000000", OWNER, THREAD_ROOT)],
-			hits: [hit("1792000000.000001", OWNER), hit(THREAD_ROOT, "U1", THREAD_ROOT)],
-		});
-		// Every hit is engaged, so the run ends before the model is called.
-		const result = await runDigest({
-			client,
-			store,
-			model: null as never,
+	it("tells the editor what was briefed recently", async () => {
+		const { model, prompts } = scriptedModel(findings, draft);
+		await runDigest({
+			client: fakeClient(search, threads),
+			store: fakeStore({
+				recentBriefingItems: () => [{ section: "whats_new", text: "Vibe 2.0 GA set for 12 Nov", createdAt: NOW.getTime() - 86_400_000 }],
+			}),
+			model,
 			ownerId: OWNER,
-			since,
-			now,
+			timeZone: "Europe/London",
+			since: SINCE,
+			now: NOW,
+		});
+		expect(prompts[1]).toContain("Vibe 2.0 GA set for 12 Nov");
+	});
+
+	it("falls back to unedited findings when the editor fails", async () => {
+		const { model } = scriptedModel(findings, new Error("editor unavailable"));
+		const result = await runDigest({
+			client: fakeClient(search, threads),
+			store: fakeStore(),
+			model,
+			ownerId: OWNER,
+			timeZone: "Europe/London",
+			since: SINCE,
+			now: NOW,
+		});
+		expect(result.status).toBe("ok");
+		if (result.status !== "ok") return;
+		expect(result.briefing.items.map((i) => i.section)).toEqual(["needs_you", "whats_new"]);
+	});
+
+	it("fails the run when no batch could be read, so the scheduler retries", async () => {
+		const { model } = scriptedModel(new Error("model unavailable"));
+		await expect(
+			runDigest({
+				client: fakeClient(search, threads),
+				store: fakeStore(),
+				model,
+				ownerId: OWNER,
+				timeZone: "Europe/London",
+				since: SINCE,
+				now: NOW,
+			}),
+		).rejects.toThrow();
+	});
+
+	it("never calls the model on a quiet day", async () => {
+		const { model, prompts } = scriptedModel(findings, draft);
+		const result = await runDigest({
+			client: fakeClient(() => []),
+			store: fakeStore(),
+			model,
+			ownerId: OWNER,
+			timeZone: "Europe/London",
+			since: SINCE,
+			now: NOW,
 		});
 		expect(result.status).toBe("empty");
-		expect(result.stats).toMatchObject({ retrieved: 2, engaged: 2, candidates: 0 });
+		expect(prompts).toHaveLength(0);
 	});
 
-	it("still drops the owner's own messages when the owner search fails", async () => {
-		const { client, store } = fakes({
-			ownerSearch: async () => {
-				throw new Error("gateway down");
-			},
-			hits: [hit("1792000000.000001", OWNER)],
-		});
+	it("does not re-brief conversations that have not moved", async () => {
+		const { model, prompts } = scriptedModel(findings, draft);
 		const result = await runDigest({
-			client,
-			store,
-			model: null as never,
+			client: fakeClient(search, threads),
+			store: fakeStore({ briefedLatest: () => Number(ts(60)) }),
+			model,
 			ownerId: OWNER,
-			since,
-			now,
+			timeZone: "Europe/London",
+			since: SINCE,
+			now: NOW,
 		});
-		expect(result.stats).toMatchObject({ retrieved: 1, engaged: 1, candidates: 0 });
+		expect(result.status).toBe("empty");
+		expect(result.stats.briefedBefore).toBe(2);
+		expect(prompts).toHaveLength(0);
+	});
+
+	it("remembers the workspace host for building links later", async () => {
+		const store = fakeStore();
+		const { model } = scriptedModel(findings, draft);
+		await runDigest({
+			client: fakeClient(search, threads),
+			store,
+			model,
+			ownerId: OWNER,
+			timeZone: "Europe/London",
+			since: SINCE,
+			now: NOW,
+		});
+		expect(store.workspaceHost()).toBe(HOST);
 	});
 });

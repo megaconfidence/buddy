@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	BRIEFING_WATCH_SECONDS,
 	BURST_SECONDS,
 	IDLE_SECONDS,
 	RATE_LIMITED_SECONDS,
@@ -7,6 +8,7 @@ import {
 	choosePollSchedule,
 	isWorkingHours,
 	nextPollDelaySeconds,
+	pollReadOldest,
 } from "../src/cadence";
 
 const TZ = "Europe/London";
@@ -199,5 +201,31 @@ describe("rate-limit backoff", () => {
 		expect(
 			nextPollDelaySeconds({ ...base, now, rateLimitedUntil: null }),
 		).toBe(WORKING_SECONDS);
+	});
+});
+
+describe("pollReadOldest", () => {
+	const briefing = "1789700000.123456";
+	const later = "1789710000.000000";
+	const nowSec = 1789712000;
+
+	it("reaches back to the latest briefing, so replies in its thread are seen", () => {
+		// The cursor has moved past the briefing; without this, its thread's
+		// signature would never be read again.
+		expect(pollReadOldest({ cursor: later, briefingTs: briefing, nowSec })).toBe("1789699999.123456");
+	});
+
+	it("leaves the cursor alone when the briefing is newer than it", () => {
+		expect(pollReadOldest({ cursor: "1789600000.000000", briefingTs: briefing, nowSec })).toBe("1789600000.000000");
+	});
+
+	it("stops watching an old briefing", () => {
+		const stale = Number(briefing) + BRIEFING_WATCH_SECONDS + 1;
+		expect(pollReadOldest({ cursor: later, briefingTs: briefing, nowSec: stale })).toBe(later);
+	});
+
+	it("changes nothing before the first briefing or the first poll", () => {
+		expect(pollReadOldest({ cursor: later, briefingTs: null, nowSec })).toBe(later);
+		expect(pollReadOldest({ cursor: null, briefingTs: briefing, nowSec })).toBeNull();
 	});
 });

@@ -118,6 +118,27 @@ export function choosePollSchedule(opts: {
 	return { arm: true, cancelIds: polls.map((s) => s.id) };
 }
 
+/** How long the latest briefing's thread stays watched for replies. */
+export const BRIEFING_WATCH_SECONDS = 36 * 3_600;
+
+/**
+ * `oldest` for the inbox read.
+ *
+ * A thread reply is only visible as the `Thread:` signature on its parent,
+ * and only parents inside the read window are seen. The cursor moves past the
+ * briefing as soon as anything newer is posted, so without widening the
+ * window, replies in the briefing's thread, the natural place to ask "more on
+ * 3", would go unanswered. New top-level input is still decided by the cursor
+ * alone; widening only adds parents to watch.
+ */
+export function pollReadOldest(opts: { cursor: string | null; briefingTs: string | null; nowSec: number }): string | null {
+	const { cursor, briefingTs, nowSec } = opts;
+	if (!cursor || !briefingTs || nowSec - Number(briefingTs) > BRIEFING_WATCH_SECONDS) return cursor;
+	// One second early, so the parent is included whether or not `oldest` is inclusive.
+	const watch = (Number(briefingTs) - 1).toFixed(6);
+	return Number(watch) < Number(cursor) ? watch : cursor;
+}
+
 export function nextPollDelaySeconds(opts: {
 	now: Date;
 	timeZone: string;

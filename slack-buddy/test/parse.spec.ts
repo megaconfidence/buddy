@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+	buildPermalink,
+	cleanAuthorName,
+	isSlackPermalink,
 	parseConversation,
+	parseSearchEnvelope,
 	parseSearchResults,
+	parseSlackLocalTime,
 	permalinkMatches,
+	workspaceHostOf,
 } from "../src/slack/parse";
 
 /**
@@ -133,6 +139,127 @@ describe("parseSearchResults", () => {
 		const hits = parseSearchResults(SEARCH);
 		expect(hits[0].authorId).toBe("U00");
 		expect(hits[0].authorName).toBeNull();
+	});
+
+	it("reads the bot marker", () => {
+		const hits = parseSearchResults(SEARCH);
+		expect(hits[0].isBot).toBe(true);
+		expect(hits[1].isBot).toBe(false);
+	});
+
+	it("keeps the context as readable lines, without ids or emails", () => {
+		const hits = parseSearchResults(SEARCH);
+		expect(hits[0].context).toBe("Léonard de La Seiglière: Thanks a lot!");
+		expect(hits[1].context).toBe("");
+	});
+});
+
+describe("parseSearchEnvelope", () => {
+	it("splits the rendered results from a cursor in the envelope", () => {
+		const raw = JSON.stringify({ results: SEARCH, response_metadata: { next_cursor: "Q1VSUkVOVF9QQUdFOjI=" } });
+		const { results, nextCursor } = parseSearchEnvelope(raw);
+		expect(parseSearchResults(results)).toHaveLength(2);
+		expect(nextCursor).toBe("Q1VSUkVOVF9QQUdFOjI=");
+	});
+
+	it("reads the cursor from pagination_info, as the gateway actually sends it", () => {
+		// Shape observed live on 2026-11-01; the cursor value is illustrative.
+		const raw = JSON.stringify({
+			results: SEARCH,
+			pagination_info: "For the next page of results use cursor `Q1VSUkVOVF9QQUdFOjI=`",
+		});
+		expect(parseSearchEnvelope(raw).nextCursor).toBe("Q1VSUkVOVF9QQUdFOjI=");
+	});
+
+	it("returns no cursor when pagination_info says there is nothing more", () => {
+		const raw = JSON.stringify({ results: SEARCH, pagination_info: "There are no more messages available." });
+		expect(parseSearchEnvelope(raw).nextCursor).toBeNull();
+	});
+
+	it("finds a cursor rendered as text", () => {
+		const raw = JSON.stringify({ results: SEARCH, pagination_info: "Next cursor: Q1VSUkVOVF9QQUdFOjI=" });
+		expect(parseSearchEnvelope(raw).nextCursor).toBe("Q1VSUkVOVF9QQUdFOjI=");
+	});
+
+	it("does not mistake a message body for a cursor", () => {
+		const body = SEARCH.replace("Thanks a lot!", "the next cursor: abcdefgh is in the doc");
+		expect(parseSearchEnvelope(JSON.stringify({ results: body })).nextCursor).toBeNull();
+	});
+
+	it("returns no cursor on the last page", () => {
+		expect(parseSearchEnvelope(JSON.stringify({ results: SEARCH })).nextCursor).toBeNull();
+	});
+
+	it("accepts a payload that is not JSON", () => {
+		const { results, nextCursor } = parseSearchEnvelope(SEARCH);
+		expect(results).toBe(SEARCH);
+		expect(nextCursor).toBeNull();
+	});
+});
+
+describe("parseSlackLocalTime", () => {
+	it("parses the gateway's rendered times with their zone", () => {
+		expect(parseSlackLocalTime("2026-09-17 20:47:14 BST")).toBe(Date.UTC(2026, 8, 17, 19, 47, 14));
+		expect(parseSlackLocalTime("2026-12-01 09:00:00 GMT")).toBe(Date.UTC(2026, 11, 1, 9, 0, 0));
+		expect(parseSlackLocalTime("2026-12-01 09:00:00 +01:00")).toBe(Date.UTC(2026, 11, 1, 8, 0, 0));
+	});
+
+	it("refuses to guess an unknown or missing zone", () => {
+		expect(parseSlackLocalTime("2026-09-17 20:47:14 IST")).toBeNull();
+		expect(parseSlackLocalTime("2026-09-17 20:47:14")).toBeNull();
+		expect(parseSlackLocalTime(null)).toBeNull();
+	});
+});
+
+describe("cleanAuthorName", () => {
+	it("drops the email", () => {
+		expect(cleanAuthorName("Lucero Olveira <krimson@joyco.studio>")).toBe("Lucero Olveira");
+		expect(cleanAuthorName("")).toBeNull();
+	});
+});
+
+describe("buildPermalink", () => {
+	it("builds a link from known ids", () => {
+		expect(buildPermalink("mistralai.slack.com", "C083YJ8348H", "1789672700.289059")).toBe(
+			"https://mistralai.slack.com/archives/C083YJ8348H/p1789672700289059",
+		);
+	});
+
+	it("refuses anything that is not a Slack workspace or a real id", () => {
+		expect(buildPermalink("evil.example", "C083YJ8348H", "1789672700.289059")).toBeNull();
+		expect(buildPermalink(null, "C083YJ8348H", "1789672700.289059")).toBeNull();
+		expect(buildPermalink("mistralai.slack.com", "C08/../x", "1789672700.289059")).toBeNull();
+	});
+
+	it("learns the host from a permalink", () => {
+		expect(workspaceHostOf("https://mistralai.slack.com/archives/C1/p1")).toBe("mistralai.slack.com");
+		expect(workspaceHostOf("https://evil.example/archives/C1/p1")).toBeNull();
+	});
+
+	it("supports Enterprise Grid hosts, which have an extra label", () => {
+		// Regression: a one-label host pattern rejected every live permalink.
+		const host = "acme.enterprise.slack.com";
+		expect(workspaceHostOf(`https://${host}/archives/C083YJ8348H/p1789672700289059?thread_ts=1789486066.556089&cid=C083YJ8348H`)).toBe(host);
+		expect(buildPermalink(host, "C083YJ8348H", "1789672700.289059")).toBe(`https://${host}/archives/C083YJ8348H/p1789672700289059`);
+	});
+});
+
+describe("isSlackPermalink", () => {
+	it("accepts plain and Enterprise Grid permalinks, with thread parameters", () => {
+		expect(isSlackPermalink("https://mistralai.slack.com/archives/C083YJ8348H/p1789672700289059")).toBe(true);
+		expect(
+			isSlackPermalink(
+				"https://acme.enterprise.slack.com/archives/C083YJ8348H/p1789672700289059?thread_ts=1789486066.556089&cid=C083YJ8348H",
+			),
+		).toBe(true);
+	});
+
+	it("rejects anything else", () => {
+		expect(isSlackPermalink("https://slack.com.evil.example/archives/C1/p1")).toBe(false);
+		expect(isSlackPermalink("http://acme.slack.com/archives/C1/p1")).toBe(false);
+		expect(isSlackPermalink("https://acme.slack.com/archives/C1/p1)[x](https://evil.example")).toBe(false);
+		expect(isSlackPermalink("https://acme.slack.com/messages/C1")).toBe(false);
+		expect(isSlackPermalink(null)).toBe(false);
 	});
 });
 

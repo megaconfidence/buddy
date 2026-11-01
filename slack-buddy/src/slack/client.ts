@@ -1,9 +1,8 @@
 import { MCP_SERVER_ID } from "./tools";
 import {
 	parseConversation,
-	parseReactions,
+	parseSearchEnvelope,
 	parseSearchResults,
-	type Reaction,
 	type SearchHit,
 	type SlackMessage,
 } from "./parse";
@@ -26,6 +25,8 @@ export type McpCaller = {
 };
 
 export class SlackGatewayError extends Error {}
+
+export type SearchPage = { hits: SearchHit[]; nextCursor: string | null };
 
 type CallResult = {
 	isError?: boolean;
@@ -113,10 +114,13 @@ export class SlackClient {
 	}
 
 	/**
-	 * Search the channels the owner has joined.
+	 * Search the channels the owner has joined. Returns one page.
 	 *
 	 * `channel_types` is always passed explicitly. The gateway default includes
 	 * `im,mpim`, which would pull direct messages into the sweep.
+	 *
+	 * Search is the scarce call: Slack allows a user roughly ten a minute and
+	 * counts every page. Callers page only where recall matters most.
 	 */
 	async searchJoined(opts: {
 		keywords: string[];
@@ -127,38 +131,25 @@ export class SlackClient {
 		before?: string;
 		limit?: number;
 		includeContext?: boolean;
-	}): Promise<SearchHit[]> {
-		const text = await this.callField(
-			"slack_search_public_and_private",
-			{
-				query: opts.keywords.join(" "),
-				keywords: opts.keywords,
-				...(opts.filters ? { filters: opts.filters } : {}),
-				natural_language_query: opts.naturalLanguageQuery ?? "",
-				only_my_channels: true,
-				channel_types: "public_channel,private_channel",
-				sort: "timestamp",
-				sort_dir: "desc",
-				limit: opts.limit ?? 20,
-				include_context: opts.includeContext ?? true,
-				...(opts.after ? { after: opts.after } : {}),
-				...(opts.before ? { before: opts.before } : {}),
-			},
-			"results",
-		);
-		return parseSearchResults(text);
-	}
-
-	async getReactions(
-		channelId: string,
-		messageTs: string,
-	): Promise<Reaction[]> {
-		const text = await this.callField(
-			"slack_get_reactions",
-			{ channel_id: channelId, message_ts: messageTs },
-			"result",
-		);
-		return parseReactions(text);
+		cursor?: string;
+	}): Promise<SearchPage> {
+		const raw = await this.call("slack_search_public_and_private", {
+			query: opts.keywords.join(" "),
+			keywords: opts.keywords,
+			...(opts.filters ? { filters: opts.filters } : {}),
+			natural_language_query: opts.naturalLanguageQuery ?? "",
+			only_my_channels: true,
+			channel_types: "public_channel,private_channel",
+			sort: "timestamp",
+			sort_dir: "desc",
+			limit: opts.limit ?? 20,
+			include_context: opts.includeContext ?? true,
+			...(opts.after ? { after: opts.after } : {}),
+			...(opts.before ? { before: opts.before } : {}),
+			...(opts.cursor ? { cursor: opts.cursor } : {}),
+		});
+		const { results, nextCursor } = parseSearchEnvelope(raw);
+		return { hits: parseSearchResults(results), nextCursor };
 	}
 
 	// --------------------------------------------------------------- writes
@@ -166,6 +157,12 @@ export class SlackClient {
 	/**
 	 * Send a message. Returns the timestamp so the caller can record it in the
 	 * sent ledger before advancing any cursor.
+	 *
+	 * `slack_send_message` takes standard Markdown (`**bold**`, `[label](url)`)
+	 * and caps a message at 5,000 characters (its live description, checked
+	 * 2026-11-01). Its only preview switch is `unfurl_app_links`, which covers
+	 * app links such as GitHub; nothing turns off Slack's own message-link
+	 * previews.
 	 */
 	async sendMessage(opts: {
 		channelId: string;

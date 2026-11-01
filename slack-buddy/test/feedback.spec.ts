@@ -1,72 +1,59 @@
 import { describe, expect, it } from "vitest";
 import {
+	DEFAULT_PROFILE,
 	DEMOTE_AT,
 	PROMOTE_AT,
-	classifyReactions,
+	applyVerdict,
+	exampleOf,
+	termDirection,
 	watchlistAction,
 } from "../src/feedback";
-import { parseReactions } from "../src/slack/parse";
 
-const OWNER = "U0BUM44636U";
+const idea = { section: "content_idea" as const, text: "Ship a coding agent with Vibe 2.0", format: "video" as const };
+const news = { section: "whats_new" as const, text: "Codestral 3 is live", format: null };
 
-// Verbatim gateway output, captured 2026-09-17.
-const REAL = "Reactions on message:\n\n:+1: × 1 — confidence (U0BUM44636U)";
-const NONE = "No reactions found on this message.";
-
-describe("parseReactions", () => {
-	it("parses the live reaction format", () => {
-		expect(parseReactions(REAL)).toEqual([
-			{ emoji: "+1", count: 1, userIds: [OWNER] },
-		]);
+describe("applyVerdict", () => {
+	it("learns from a useful item, including its content format", () => {
+		const profile = applyVerdict(DEFAULT_PROFILE, idea, "useful");
+		expect(profile.positiveExamples).toEqual([exampleOf(idea)]);
+		expect(profile.preferredFormats).toEqual(["video"]);
+		expect(profile.version).toBe(DEFAULT_PROFILE.version + 1);
 	});
 
-	it("returns nothing for the empty case", () => {
-		expect(parseReactions(NONE)).toEqual([]);
+	it("learns from noise", () => {
+		const profile = applyVerdict(DEFAULT_PROFILE, news, "noise");
+		expect(profile.negativeExamples).toEqual(["What's new: Codestral 3 is live"]);
+		expect(profile.positiveExamples).toEqual([]);
 	});
 
-	it("handles several reactors on one emoji", () => {
-		const text =
-			"Reactions on message:\n\n:fire: × 2 — confidence (U0BUM44636U), Ada (U999)";
-		expect(parseReactions(text)[0]).toEqual({
-			emoji: "fire",
-			count: 2,
-			userIds: [OWNER, "U999"],
-		});
+	it("lets a later verdict replace an earlier one", () => {
+		const changed = applyVerdict(applyVerdict(DEFAULT_PROFILE, news, "useful"), news, "noise");
+		expect(changed.positiveExamples).toEqual([]);
+		expect(changed.negativeExamples).toHaveLength(1);
+	});
+
+	it("records nothing for handled, which says nothing about relevance", () => {
+		expect(applyVerdict(DEFAULT_PROFILE, news, "handled")).toBe(DEFAULT_PROFILE);
+	});
+
+	it("keeps the profile bounded", () => {
+		let profile = DEFAULT_PROFILE;
+		for (let i = 0; i < 50; i++) profile = applyVerdict(profile, { ...news, text: `Item ${i}` }, "useful");
+		expect(profile.positiveExamples).toHaveLength(30);
+		expect(profile.positiveExamples.at(-1)).toContain("Item 49");
+	});
+
+	it("does not mutate the profile it was given", () => {
+		applyVerdict(DEFAULT_PROFILE, idea, "useful");
+		expect(DEFAULT_PROFILE.positiveExamples).toEqual([]);
 	});
 });
 
-describe("classifyReactions", () => {
-	it("reads an alias-canonicalised thumbsup as useful", () => {
-		// The reaction was added as `thumbsup`; Slack stores it as `+1`.
-		// Matching on the alias would silently never fire.
-		expect(classifyReactions(parseReactions(REAL), OWNER)).toBe("useful");
-	});
-
-	it("reads a thumbsdown as noise", () => {
-		const reactions = [{ emoji: "-1", count: 1, userIds: [OWNER] }];
-		expect(classifyReactions(reactions, OWNER)).toBe("noise");
-	});
-
-	it("returns none when there are no reactions", () => {
-		expect(classifyReactions([], OWNER)).toBe("none");
-	});
-
-	it("ignores reactions from anyone but the owner", () => {
-		const reactions = [{ emoji: "+1", count: 1, userIds: ["U999"] }];
-		expect(classifyReactions(reactions, OWNER)).toBe("none");
-	});
-
-	it("lets an explicit negative outrank a positive", () => {
-		const reactions = [
-			{ emoji: "+1", count: 1, userIds: [OWNER] },
-			{ emoji: "-1", count: 1, userIds: [OWNER] },
-		];
-		expect(classifyReactions(reactions, OWNER)).toBe("noise");
-	});
-
-	it("ignores the eyes ack the agent adds to owner messages", () => {
-		const reactions = [{ emoji: "eyes", count: 1, userIds: [OWNER] }];
-		expect(classifyReactions(reactions, OWNER)).toBe("none");
+describe("termDirection", () => {
+	it("scores terms up for useful and down for noise, and leaves handled alone", () => {
+		expect(termDirection("useful")).toBe("useful");
+		expect(termDirection("noise")).toBe("noise");
+		expect(termDirection("handled")).toBeNull();
 	});
 });
 

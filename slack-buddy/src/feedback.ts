@@ -1,56 +1,74 @@
-import type { Reaction } from "./slack/parse";
+import type { BriefingItem, ContentFormat, Section } from "./digest/types";
 
 /**
- * Reaction-based relevance feedback.
+ * Relevance feedback.
  *
- * Slack is already the interface, so the cheapest signal the owner can give is
- * a reaction on a briefing item. No new surface, and `slack_get_reactions` is
- * already in the read-only allowlist.
+ * The briefing is one numbered message, so per-item reactions are gone. The
+ * owner replies instead ("3 useful", "5 noise", "2 done"), and the agent
+ * records the verdict with a tool. A verdict does two things, as in
+ * changelog-buddy: it adds the item to a preference profile the model reads
+ * on every run, and it scores the query terms that surfaced the item, which
+ * promotes or drops them from the search plan.
  */
 
-export type Verdict = "useful" | "noise" | "none";
+export type Verdict = "useful" | "noise" | "handled";
+
+export type PreferenceProfile = {
+	positiveExamples: string[];
+	negativeExamples: string[];
+	preferredFormats: ContentFormat[];
+	version: number;
+};
+
+export const DEFAULT_PROFILE: PreferenceProfile = {
+	positiveExamples: [],
+	negativeExamples: [],
+	preferredFormats: [],
+	version: 1,
+};
+
+const MAX_EXAMPLES = 30;
+
+const SECTION_LABELS: Record<Section, string> = {
+	needs_you: "Needs you",
+	whats_new: "What's new",
+	opportunity: "Opportunity",
+	content_idea: "Content idea",
+};
+
+export const exampleOf = (item: Pick<BriefingItem, "section" | "text">) => `${SECTION_LABELS[item.section]}: ${item.text}`.slice(0, 240);
+
+const appendUnique = (values: string[], value: string) => [...values.filter((v) => v !== value), value].slice(-MAX_EXAMPLES);
 
 /**
- * Slack canonicalises aliases before storing them, so `thumbsup` comes back as
- * `+1`. Only normalised names appear here.
+ * Fold a verdict into the profile. A later verdict on the same item replaces
+ * an earlier one, so changing your mind does not leave the item on both
+ * lists. `handled` records nothing: dealing with an item says nothing about
+ * whether it was worth surfacing.
  */
-const USEFUL = new Set([
-	"+1",
-	"heart",
-	"fire",
-	"tada",
-	"star",
-	"bookmark",
-	"white_check_mark",
-	"raised_hands",
-]);
+export function applyVerdict(
+	profile: PreferenceProfile,
+	item: Pick<BriefingItem, "section" | "text" | "format">,
+	verdict: Verdict,
+): PreferenceProfile {
+	if (verdict === "handled") return profile;
 
-const NOISE = new Set(["-1", "x", "no_entry", "zzz", "mute", "wastebasket"]);
+	const example = exampleOf(item);
+	const useful = verdict === "useful";
+	return {
+		positiveExamples: useful ? appendUnique(profile.positiveExamples, example) : profile.positiveExamples.filter((e) => e !== example),
+		negativeExamples: useful ? profile.negativeExamples.filter((e) => e !== example) : appendUnique(profile.negativeExamples, example),
+		preferredFormats:
+			useful && item.format && !profile.preferredFormats.includes(item.format)
+				? [...profile.preferredFormats, item.format]
+				: profile.preferredFormats,
+		version: profile.version + 1,
+	};
+}
 
-/**
- * Classify the owner's reactions on one briefing item.
- *
- * Reactions from anyone else are ignored. In a self-DM nobody else can react,
- * but the rule should not depend on where the message happens to live.
- * An explicit negative outranks a positive: saying "this was noise" is a
- * deliberate act and should not be cancelled out by a stray emoji.
- */
-export function classifyReactions(
-	reactions: Reaction[],
-	ownerId: string,
-): Verdict {
-	let useful = false;
-	let noise = false;
-
-	for (const reaction of reactions) {
-		if (!reaction.userIds.includes(ownerId)) continue;
-		if (USEFUL.has(reaction.emoji)) useful = true;
-		if (NOISE.has(reaction.emoji)) noise = true;
-	}
-
-	if (noise) return "noise";
-	if (useful) return "useful";
-	return "none";
+/** How a verdict moves the score of the terms that surfaced the item. */
+export function termDirection(verdict: Verdict): "useful" | "noise" | null {
+	return verdict === "handled" ? null : verdict;
 }
 
 export const PROMOTE_AT = 2;
@@ -62,10 +80,7 @@ export const DEMOTE_AT = -2;
  * Thresholds are deliberately small. The owner sees a handful of items a day,
  * so requiring many signals would mean the list never moves.
  */
-export function watchlistAction(
-	positive: number,
-	negative: number,
-): "promote" | "demote" | "hold" {
+export function watchlistAction(positive: number, negative: number): "promote" | "demote" | "hold" {
 	const score = positive - negative;
 	if (score >= PROMOTE_AT) return "promote";
 	if (score <= DEMOTE_AT) return "demote";
