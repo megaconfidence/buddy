@@ -89,24 +89,15 @@ export type PendingSchedule = { id?: string; callback?: string; time?: number };
  * currently executing or one that was missed. Neither will fire again, so
  * neither may block re-arming.
  */
-export function choosePollSchedule(opts: {
-	nowSec: number;
-	delaySeconds: number;
-	pending: PendingSchedule[];
-}): { arm: boolean; cancelIds: string[] } {
+export function choosePollSchedule(opts: { nowSec: number; delaySeconds: number; pending: PendingSchedule[] }): {
+	arm: boolean;
+	cancelIds: string[];
+} {
 	const target = opts.nowSec + opts.delaySeconds;
-	const polls = opts.pending.filter(
-		(s): s is PendingSchedule & { id: string } =>
-			s.callback === "pollInbox" && typeof s.id === "string",
-	);
+	const polls = opts.pending.filter((s): s is PendingSchedule & { id: string } => s.callback === "pollInbox" && typeof s.id === "string");
 
-	const live = polls.filter(
-		(s) => typeof s.time === "number" && s.time > opts.nowSec,
-	);
-	const soonest = live.reduce<number | undefined>(
-		(min, s) => (min === undefined || (s.time as number) < min ? s.time : min),
-		undefined,
-	);
+	const live = polls.filter((s) => typeof s.time === "number" && s.time > opts.nowSec);
+	const soonest = live.reduce<number | undefined>((min, s) => (min === undefined || (s.time as number) < min ? s.time : min), undefined);
 
 	if (soonest !== undefined && soonest <= target) {
 		return {

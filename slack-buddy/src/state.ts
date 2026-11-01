@@ -169,9 +169,11 @@ export class Store {
 	}
 
 	isSent(ts: string): boolean {
-		return this.sql<{ ts: string }>`
+		return (
+			this.sql<{ ts: string }>`
 			SELECT ts FROM sent_ledger WHERE ts = ${ts} LIMIT 1
-		`.length > 0;
+		`.length > 0
+		);
 	}
 
 	// ------------------------------------------------------------- cursors
@@ -283,13 +285,7 @@ export class Store {
 		`;
 	}
 
-	finishDigestRun(
-		id: string,
-		status: DigestStatus,
-		itemCount: number,
-		note = "",
-		now = Date.now(),
-	): void {
+	finishDigestRun(id: string, status: DigestStatus, itemCount: number, note = "", now = Date.now()): void {
 		this.sql`
 			UPDATE digest_runs
 			SET finished_at = ${now}, status = ${status}, item_count = ${itemCount}, note = ${note}

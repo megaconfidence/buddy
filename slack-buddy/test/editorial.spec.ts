@@ -158,7 +158,9 @@ describe("finalizeBriefing", () => {
 		const draft: BriefingDraft = {
 			...EMPTY_DRAFT,
 			tldr: "Big week for Vibe.",
-			contentIdeas: [{ title: "Ship a coding agent", format: "video", hook: "Zero to PR", whyNow: "GA soon", effort: "medium", findings: ["F1"] }],
+			contentIdeas: [
+				{ title: "Ship a coding agent", format: "video", hook: "Zero to PR", whyNow: "GA soon", effort: "medium", findings: ["F1"] },
+			],
 			whatsNew: [{ text: "Vibe GA moves", isUpdate: false, certainty: "confirmed", findings: ["F1"] }],
 			needsYou: [{ text: "Review the demo", findings: ["F2"] }],
 		};
@@ -171,19 +173,30 @@ describe("finalizeBriefing", () => {
 	});
 
 	it("attaches sources from our records and merges across channels", () => {
-		const draft: BriefingDraft = { ...EMPTY_DRAFT, whatsNew: [{ text: "Vibe GA moves", isUpdate: false, certainty: "confirmed", findings: ["F1", "F2"] }] };
+		const draft: BriefingDraft = {
+			...EMPTY_DRAFT,
+			whatsNew: [{ text: "Vibe GA moves", isUpdate: false, certainty: "confirmed", findings: ["F1", "F2"] }],
+		};
 		const [item] = finalizeBriefing(draft, findings, [a, b], { ownerId: OWNER }).items;
 		expect(item.sources.map((s) => s.permalink)).toEqual([a.permalink, b.permalink]);
 		expect(item.terms).toEqual(["Vibe", "launch"]);
 	});
 
 	it("drops items citing no real finding", () => {
-		const draft: BriefingDraft = { ...EMPTY_DRAFT, whatsNew: [{ text: "Invented", isUpdate: false, certainty: "confirmed", findings: ["F99"] }] };
+		const draft: BriefingDraft = {
+			...EMPTY_DRAFT,
+			whatsNew: [{ text: "Invented", isUpdate: false, certainty: "confirmed", findings: ["F99"] }],
+		};
 		expect(finalizeBriefing(draft, findings, [a, b], { ownerId: OWNER }).items).toHaveLength(0);
 	});
 
 	it("caps each section", () => {
-		const many = Array.from({ length: 12 }, (_, i) => ({ text: `News ${i}`, isUpdate: false, certainty: "confirmed" as const, findings: ["F1"] }));
+		const many = Array.from({ length: 12 }, (_, i) => ({
+			text: `News ${i}`,
+			isUpdate: false,
+			certainty: "confirmed" as const,
+			findings: ["F1"],
+		}));
 		const items = finalizeBriefing({ ...EMPTY_DRAFT, whatsNew: many }, findings, [a, b], { ownerId: OWNER }).items;
 		expect(items).toHaveLength(MAX_ITEMS.whats_new);
 	});
@@ -214,7 +227,10 @@ describe("finalizeBriefing", () => {
 	});
 
 	it("falls back to the first item when the model wrote no summary", () => {
-		const draft: BriefingDraft = { ...EMPTY_DRAFT, whatsNew: [{ text: "Vibe GA moves", isUpdate: false, certainty: "confirmed", findings: ["F1"] }] };
+		const draft: BriefingDraft = {
+			...EMPTY_DRAFT,
+			whatsNew: [{ text: "Vibe GA moves", isUpdate: false, certainty: "confirmed", findings: ["F1"] }],
+		};
 		expect(finalizeBriefing(draft, findings, [a, b], { ownerId: OWNER }).tldr).toBe("Vibe GA moves");
 	});
 });

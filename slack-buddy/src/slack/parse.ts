@@ -330,11 +330,7 @@ export function parseSlackLocalTime(value: string | null | undefined): number | 
  * Anything that fails this check is dropped rather than shown, so the model
  * cannot attach a plausible-looking link to the wrong message.
  */
-export function permalinkMatches(
-	permalink: string | null,
-	channelId: string | null,
-	ts: string,
-): boolean {
+export function permalinkMatches(permalink: string | null, channelId: string | null, ts: string): boolean {
 	if (!permalink || !channelId) return false;
 	const compact = ts.replace(".", "");
 	return permalink.includes(`/${channelId}/`) && permalink.includes(`p${compact}`);

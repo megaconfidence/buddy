@@ -1,5 +1,13 @@
 import { isSlackPermalink } from "../slack/parse";
-import { SECTIONS, type Briefing, type BriefingItem, type BriefingSource, type ContentFormat, type DigestStats, type Section } from "./types";
+import {
+	SECTIONS,
+	type Briefing,
+	type BriefingItem,
+	type BriefingSource,
+	type ContentFormat,
+	type DigestStats,
+	type Section,
+} from "./types";
 
 /**
  * Rendering for Slack's MCP `slack_send_message`, which takes standard
@@ -228,7 +236,10 @@ export function renderFailure(opts: {
 /** The closing tip suggesting a focus channel. */
 export function focusTip(channel: { name: string | null; briefings: number; useful: number }): string {
 	const name = `#${(channel.name ?? "").replace(/[^a-z0-9_-]/gi, "")}`;
-	const why = channel.useful > 0 ? `${plural(channel.useful, "item")} you found useful came from ${name}` : `${name} fed ${channel.briefings} of your recent briefings`;
+	const why =
+		channel.useful > 0
+			? `${plural(channel.useful, "item")} you found useful came from ${name}`
+			: `${name} fed ${channel.briefings} of your recent briefings`;
 	return `Tip: ${why}. Reply "focus on ${name}" to read it in full every morning.`;
 }
 

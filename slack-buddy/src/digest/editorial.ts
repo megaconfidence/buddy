@@ -426,8 +426,7 @@ export async function composeBriefing(opts: {
  */
 export function draftFromFindings(findings: Finding[]): BriefingDraft {
 	const byValue = [...findings].sort((a, b) => b.devrelValue - a.devrelValue);
-	const pick = (kinds: Finding["kind"][], count: number) =>
-		byValue.filter((f) => !f.forOwner && kinds.includes(f.kind)).slice(0, count);
+	const pick = (kinds: Finding["kind"][], count: number) => byValue.filter((f) => !f.forOwner && kinds.includes(f.kind)).slice(0, count);
 
 	return {
 		tldr: "",
@@ -470,9 +469,7 @@ function toSource(c: Candidate): BriefingSource {
  */
 function mentionFallback(c: Candidate, ownerId: string): string {
 	const token = `<@${ownerId}>`;
-	const mention = [...c.messages]
-		.reverse()
-		.find((m) => m.authorId !== ownerId && (m.mentionsOwner === true || m.text.includes(token)));
+	const mention = [...c.messages].reverse().find((m) => m.authorId !== ownerId && (m.mentionsOwner === true || m.text.includes(token)));
 	const who = mention?.authorName ?? "Someone";
 	const excerpt = mention
 		? sanitizeText(
@@ -557,8 +554,7 @@ export function finalizeBriefing(draft: BriefingDraft, findings: Finding[], cand
 	for (const c of candidates) {
 		if (!c.assessment.mentionsOwner || represented.has(c.key)) continue;
 		if (sections.needs_you.length >= MAX_ITEMS.needs_you) break;
-		const finding =
-			findings.find((f) => f.conversationKey === c.key && f.forOwner) ?? findings.find((f) => f.conversationKey === c.key);
+		const finding = findings.find((f) => f.conversationKey === c.key && f.forOwner) ?? findings.find((f) => f.conversationKey === c.key);
 		const text = sanitizeText(finding?.summary ?? mentionFallback(c, ctx.ownerId), 220);
 		if (!text) continue;
 		sections.needs_you.push({

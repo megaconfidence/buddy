@@ -1,11 +1,5 @@
 import { MCP_SERVER_ID } from "./tools";
-import {
-	parseConversation,
-	parseSearchEnvelope,
-	parseSearchResults,
-	type SearchHit,
-	type SlackMessage,
-} from "./parse";
+import { parseConversation, parseSearchEnvelope, parseSearchResults, type SearchHit, type SlackMessage } from "./parse";
 
 /**
  * Structural type for the Agents MCP client manager.
@@ -43,10 +37,7 @@ type CallResult = {
 export class SlackClient {
 	constructor(private readonly mcp: McpCaller) {}
 
-	private async call(
-		name: string,
-		args: Record<string, unknown>,
-	): Promise<string> {
+	private async call(name: string, args: Record<string, unknown>): Promise<string> {
 		const result = (await this.mcp.callTool({
 			name,
 			arguments: args,
@@ -62,11 +53,7 @@ export class SlackClient {
 	}
 
 	/** Gateway payloads are a JSON envelope whose fields hold rendered text. */
-	private async callField(
-		name: string,
-		args: Record<string, unknown>,
-		field: string,
-	): Promise<string> {
+	private async callField(name: string, args: Record<string, unknown>, field: string): Promise<string> {
 		const raw = await this.call(name, args);
 		try {
 			const envelope = JSON.parse(raw) as Record<string, unknown>;
@@ -79,10 +66,7 @@ export class SlackClient {
 
 	// ---------------------------------------------------------------- reads
 
-	async readChannel(
-		channelId: string,
-		opts: { oldest?: string; limit?: number } = {},
-	): Promise<SlackMessage[]> {
+	async readChannel(channelId: string, opts: { oldest?: string; limit?: number } = {}): Promise<SlackMessage[]> {
 		const text = await this.callField(
 			"slack_read_channel",
 			{
@@ -95,11 +79,7 @@ export class SlackClient {
 		return parseConversation(text);
 	}
 
-	async readThread(
-		channelId: string,
-		messageTs: string,
-		opts: { oldest?: string; limit?: number } = {},
-	): Promise<SlackMessage[]> {
+	async readThread(channelId: string, messageTs: string, opts: { oldest?: string; limit?: number } = {}): Promise<SlackMessage[]> {
 		const text = await this.callField(
 			"slack_read_thread",
 			{
@@ -198,18 +178,12 @@ export class SlackClient {
 		}
 
 		if (!ts) {
-			throw new SlackGatewayError(
-				`slack_send_message returned no message_ts: ${raw.slice(0, 200)}`,
-			);
+			throw new SlackGatewayError(`slack_send_message returned no message_ts: ${raw.slice(0, 200)}`);
 		}
 		return { ts, permalink };
 	}
 
-	async addReaction(
-		channelId: string,
-		messageTs: string,
-		emoji: string,
-	): Promise<void> {
+	async addReaction(channelId: string, messageTs: string, emoji: string): Promise<void> {
 		await this.call("slack_add_reaction", {
 			channel_id: channelId,
 			message_ts: messageTs,

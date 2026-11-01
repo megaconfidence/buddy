@@ -1,13 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { TEAM_TERMS } from "../src/digest/collect";
-import {
-	SEARCH_BUDGET,
-	buildQueryPlan,
-	lastOwnerPosts,
-	runDigest,
-	threadKey,
-	type DigestStore,
-} from "../src/digest";
+import { SEARCH_BUDGET, buildQueryPlan, lastOwnerPosts, runDigest, threadKey, type DigestStore } from "../src/digest";
 import { DEFAULT_PROFILE } from "../src/feedback";
 import type { SlackClient } from "../src/slack/client";
 import type { SearchHit, SlackMessage } from "../src/slack/parse";
@@ -188,30 +181,21 @@ function hit(ts: string, authorId: string, threadTs?: string): SearchHit {
 
 describe("threadKey", () => {
 	it("uses the permalink's thread_ts for a reply", () => {
-		expect(threadKey(hit("1792143734.978529", "U1", THREAD_ROOT))).toBe(
-			`${CHANNEL}:${THREAD_ROOT}`,
-		);
+		expect(threadKey(hit("1792143734.978529", "U1", THREAD_ROOT))).toBe(`${CHANNEL}:${THREAD_ROOT}`);
 	});
 
 	it("puts a thread parent in its own thread", () => {
-		expect(threadKey(hit(THREAD_ROOT, "U1", THREAD_ROOT))).toBe(
-			`${CHANNEL}:${THREAD_ROOT}`,
-		);
+		expect(threadKey(hit(THREAD_ROOT, "U1", THREAD_ROOT))).toBe(`${CHANNEL}:${THREAD_ROOT}`);
 	});
 
 	it("treats a message that starts no thread as its own root", () => {
-		expect(threadKey(hit("1792000000.000001", "U1"))).toBe(
-			`${CHANNEL}:1792000000.000001`,
-		);
+		expect(threadKey(hit("1792000000.000001", "U1"))).toBe(`${CHANNEL}:1792000000.000001`);
 	});
 });
 
 describe("lastOwnerPosts", () => {
 	it("keeps the owner's latest post per thread", () => {
-		const posts = lastOwnerPosts(
-			[hit("1792143600.000000", OWNER, THREAD_ROOT), hit("1792143700.000000", OWNER, THREAD_ROOT)],
-			OWNER,
-		);
+		const posts = lastOwnerPosts([hit("1792143600.000000", OWNER, THREAD_ROOT), hit("1792143700.000000", OWNER, THREAD_ROOT)], OWNER);
 		expect(posts.get(`${CHANNEL}:${THREAD_ROOT}`)).toBe(1792143700);
 	});
 
@@ -303,7 +287,14 @@ describe("runDigest", () => {
 		whatsNew: [{ text: "Vibe 2.0 GA moved from 12 to 19 Nov", isUpdate: false, certainty: "confirmed", findings: ["F1"] }],
 		opportunities: [],
 		contentIdeas: [
-			{ title: "Ship a coding agent with Vibe 2.0", format: "video", hook: "Zero to PR in ten minutes", whyNow: "GA on 19 Nov", effort: "medium", findings: ["F1"] },
+			{
+				title: "Ship a coding agent with Vibe 2.0",
+				format: "video",
+				hook: "Zero to PR in ten minutes",
+				whyNow: "GA on 19 Nov",
+				effort: "medium",
+				findings: ["F1"],
+			},
 		],
 	};
 

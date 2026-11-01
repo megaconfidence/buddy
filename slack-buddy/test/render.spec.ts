@@ -107,7 +107,9 @@ describe("renderBriefing", () => {
 	});
 
 	it("links at most two sources per item, one per channel", () => {
-		const busy = item(1, "whats_new", "News", { sources: [source("vibe", 1), source("vibe", 2), source("launches", 3), source("events", 4)] });
+		const busy = item(1, "whats_new", "News", {
+			sources: [source("vibe", 1), source("vibe", 2), source("launches", 3), source("events", 4)],
+		});
 		const line = renderBriefing({ tldr: "", items: [busy] }, ctx);
 		expect(line).toContain(`· [#vibe](${permalink(CHANNEL, ts(1))}), [#launches](${permalink(CHANNEL, ts(3))})`);
 		expect(line).not.toContain(permalink(CHANNEL, ts(2)));
@@ -191,7 +193,9 @@ describe("fitBriefing", () => {
 
 describe("renderQuiet", () => {
 	it("says the run happened, and what it read", () => {
-		expect(renderQuiet(ctx)).toMatch(/^\*\*Morning briefing · Thu 17 Sept?\*\* — nothing worth surfacing\.\n_Read 412 messages across 14 channels since Wed 14:30\._$/);
+		expect(renderQuiet(ctx)).toMatch(
+			/^\*\*Morning briefing · Thu 17 Sept?\*\* — nothing worth surfacing\.\n_Read 412 messages across 14 channels since Wed 14:30\._$/,
+		);
 	});
 
 	it("distinguishes an empty window from an uneventful one", () => {

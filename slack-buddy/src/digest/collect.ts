@@ -581,24 +581,22 @@ export async function collectConversations(opts: {
 	// Read the most promising threads in full. A keyword hit is one message;
 	// the decision, the date and the ask are usually in the replies.
 	const watchlist = new Set(opts.watchlist.map((t) => t.toLowerCase()));
-	pool.sort((a, b) => scoreConversation(b, null, watchlist, team) - scoreConversation(a, null, watchlist, team) || b.activityTs - a.activityTs);
-	await mapLimit(
-		pool.filter((c) => c.expandable).slice(0, MAX_EXPANSIONS),
-		READ_CONCURRENCY,
-		async (conv) => {
-			stats.reads++;
-			try {
-				const thread = await opts.client.readThread(conv.channelId, conv.rootTs, { limit: 200 });
-				for (const m of thread) {
-					addMessage(conv, fromSlackMessage(m));
-					note(conv.channelId, m.ts);
-				}
-				conv.expanded = thread.length > 0;
-			} catch {
-				// The hits alone still describe it.
-			}
-		},
+	pool.sort(
+		(a, b) => scoreConversation(b, null, watchlist, team) - scoreConversation(a, null, watchlist, team) || b.activityTs - a.activityTs,
 	);
+	await mapLimit(pool.filter((c) => c.expandable).slice(0, MAX_EXPANSIONS), READ_CONCURRENCY, async (conv) => {
+		stats.reads++;
+		try {
+			const thread = await opts.client.readThread(conv.channelId, conv.rootTs, { limit: 200 });
+			for (const m of thread) {
+				addMessage(conv, fromSlackMessage(m));
+				note(conv.channelId, m.ts);
+			}
+			conv.expanded = thread.length > 0;
+		} catch {
+			// The hits alone still describe it.
+		}
+	});
 
 	const candidates: Candidate[] = [];
 	for (const conv of pool) {

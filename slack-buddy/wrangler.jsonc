@@ -9,7 +9,7 @@
 	"compatibility_date": "2026-09-15",
 	"compatibility_flags": ["nodejs_compat"],
 	"observability": {
-		"enabled": true
+		"enabled": true,
 	},
 	"upload_source_maps": true,
 
@@ -26,18 +26,18 @@
 		"OWNER_TIMEZONE": "Europe/London",
 		"MODEL_BASE_URL": "https://api.mistral.ai/v1",
 		"MODEL_ID": "glm-5-2",
-		"MODEL_FALLBACK_ID": "mistral-medium-latest"
+		"MODEL_FALLBACK_ID": "mistral-medium-latest",
 	},
 
 	// Re-anchors the Durable Object and its poll alarm after a deploy or
 	// eviction. The alarm itself drives the actual poll cadence.
 	"triggers": {
-		"crons": ["*/15 * * * *"]
+		"crons": ["*/15 * * * *"],
 	},
 
 	"durable_objects": {
-		"bindings": [{ "name": "SlackBuddy", "class_name": "SlackBuddy" }]
+		"bindings": [{ "name": "SlackBuddy", "class_name": "SlackBuddy" }],
 	},
 
-	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["SlackBuddy"] }]
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["SlackBuddy"] }],
 }

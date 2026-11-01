@@ -3,31 +3,12 @@ import { Think, type ThinkScheduledTasks } from "@cloudflare/think";
 import { tool, type LanguageModel, type ToolSet } from "ai";
 import { z } from "zod";
 
-import {
-	choosePollSchedule,
-	nextPollDelaySeconds,
-	pollReadOldest,
-	type PendingSchedule,
-} from "./cadence";
+import { choosePollSchedule, nextPollDelaySeconds, pollReadOldest, type PendingSchedule } from "./cadence";
 import { runDigest } from "./digest";
 import { MAX_FOCUS_CHANNELS } from "./digest/collect";
-import {
-	briefingTitle,
-	catchUpNote,
-	describeStats,
-	fitBriefing,
-	focusTip,
-	renderFailure,
-	renderQuiet,
-} from "./digest/render";
+import { briefingTitle, catchUpNote, describeStats, fitBriefing, focusTip, renderFailure, renderQuiet } from "./digest/render";
 import type { Briefing, Section } from "./digest/types";
-import {
-	applyVerdict,
-	suggestFocusChannel,
-	tallyChannels,
-	termDirection,
-	type ChannelTally,
-} from "./feedback";
+import { applyVerdict, suggestFocusChannel, tallyChannels, termDirection, type ChannelTally } from "./feedback";
 import {
 	describeFailure,
 	isConnectionStuck,
@@ -104,9 +85,7 @@ function briefedThreads(briefing: Briefing): Array<{ key: string; latestTs: stri
 }
 
 function turnText(result: unknown): string {
-	const message = (
-		result as { message?: { parts?: Array<{ type?: string; text?: string }> } }
-	)?.message;
+	const message = (result as { message?: { parts?: Array<{ type?: string; text?: string }> } })?.message;
 	return (message?.parts ?? [])
 		.filter((p) => p.type === "text")
 		.map((p) => p.text ?? "")
@@ -185,9 +164,7 @@ export class SlackBuddy extends Think<Env> {
 		// that never comes. That is how the October outage stuck for days.
 		const dead = existing?.state === "failed" || existing?.state === "authenticating";
 		if (existing && (force || dead)) {
-			console.warn(
-				`Dropping MCP registration in state "${existing.state}" (${existing.error ?? "no error"})`,
-			);
+			console.warn(`Dropping MCP registration in state "${existing.state}" (${existing.error ?? "no error"})`);
 			await this.removeMcpServer(MCP_SERVER_ID).catch(() => {});
 		}
 
@@ -209,9 +186,7 @@ export class SlackBuddy extends Think<Env> {
 		await this.mcp.waitForConnections({ timeout: 10_000 }).catch(() => {});
 
 		const state = this.getMcpServers().servers[MCP_SERVER_ID]?.state ?? "absent";
-		const tools = Object.keys(
-			this.mcp.getAITools({ serverId: MCP_SERVER_ID }),
-		).length;
+		const tools = Object.keys(this.mcp.getAITools({ serverId: MCP_SERVER_ID })).length;
 		console.log(`MCP after connect: state=${state} tools=${tools}`);
 		return { state, tools };
 	}
@@ -297,9 +272,7 @@ export class SlackBuddy extends Think<Env> {
 	 */
 	private activeModelId(): string {
 		const until = this.readInstant(MODEL_FALLBACK_UNTIL);
-		return until !== null && Date.now() < until
-			? this.env.MODEL_FALLBACK_ID
-			: this.env.MODEL_ID;
+		return until !== null && Date.now() < until ? this.env.MODEL_FALLBACK_ID : this.env.MODEL_ID;
 	}
 
 	getModel(): LanguageModel {
@@ -378,18 +351,14 @@ export class SlackBuddy extends Think<Env> {
 	}
 
 	getTools(): ToolSet {
-		const { tools, missing } = applyToolPolicy(
-			this.mcp.getAITools({ serverId: MCP_SERVER_ID }),
-		);
+		const { tools, missing } = applyToolPolicy(this.mcp.getAITools({ serverId: MCP_SERVER_ID }));
 
 		// A partial catalog means discovery has not finished, not that policy
 		// was violated. Degrade to the local tools rather than failing the
 		// turn: the model then has no way to search, and says so, instead of
 		// the agent going silent.
 		if (missing.length > 0) {
-			console.warn(
-				`MCP catalog incomplete: ${Object.keys(tools).length}/12 Slack tools; missing ${missing.join(", ")}`,
-			);
+			console.warn(`MCP catalog incomplete: ${Object.keys(tools).length}/12 Slack tools; missing ${missing.join(", ")}`);
 		}
 
 		return { ...tools, ...this.localTools() };
@@ -398,8 +367,7 @@ export class SlackBuddy extends Think<Env> {
 	private localTools(): ToolSet {
 		return {
 			manage_watchlist: tool({
-				description:
-					"List, add, or remove the topics tracked in the daily briefing.",
+				description: "List, add, or remove the topics tracked in the daily briefing.",
 				inputSchema: z.object({
 					action: z.enum(["list", "add", "remove"]),
 					topic: z.string().optional(),
@@ -411,8 +379,7 @@ export class SlackBuddy extends Think<Env> {
 				},
 			}),
 			digest_history: tool({
-				description:
-					"Recent daily briefing runs, including empty and failed ones. Use this to answer whether a briefing ran.",
+				description: "Recent daily briefing runs, including empty and failed ones. Use this to answer whether a briefing ran.",
 				inputSchema: z.object({ limit: z.number().min(1).max(30).default(7) }),
 				execute: async ({ limit }) => ({ runs: this.store.recentRuns(limit) }),
 			}),
@@ -420,12 +387,7 @@ export class SlackBuddy extends Think<Env> {
 				description:
 					"Run the full briefing sweep now and post it to the DM. Use only when the owner explicitly asks for a briefing, digest, or what they missed. Do not call it to answer a general question — search directly instead.",
 				inputSchema: z.object({
-					hours: z
-						.number()
-						.min(1)
-						.max(168)
-						.default(18)
-						.describe("How far back to look, in hours"),
+					hours: z.number().min(1).max(168).default(18).describe("How far back to look, in hours"),
 				}),
 				execute: async ({ hours }) => {
 					// Retrieved channel text reaches the model, so a message in
@@ -433,9 +395,7 @@ export class SlackBuddy extends Think<Env> {
 					// bounds that to a nuisance rather than a flood.
 					const last = this.readInstant(LAST_MANUAL_BRIEFING);
 					if (last !== null && Date.now() - last < MANUAL_BRIEFING_COOLDOWN_MS) {
-						const wait = Math.ceil(
-							(MANUAL_BRIEFING_COOLDOWN_MS - (Date.now() - last)) / 60_000,
-						);
+						const wait = Math.ceil((MANUAL_BRIEFING_COOLDOWN_MS - (Date.now() - last)) / 60_000);
 						return {
 							ran: false,
 							reason: `A briefing ran recently. Try again in ${wait} minute${wait === 1 ? "" : "s"}.`,
@@ -450,14 +410,9 @@ export class SlackBuddy extends Think<Env> {
 					try {
 						// Ad-hoc runs do not move the window anchor, so asking
 						// now cannot starve the next scheduled briefing.
-						await this.runDailyDigest(
-							`adhoc-${Date.now()}`,
-							Date.now() - hours * 3_600_000,
-							false,
-						);
+						await this.runDailyDigest(`adhoc-${Date.now()}`, Date.now() - hours * 3_600_000, false);
 					} catch (error) {
-						const message =
-							error instanceof Error ? error.message : String(error);
+						const message = error instanceof Error ? error.message : String(error);
 						return {
 							ran: false,
 							reason: /429|too many requests|rate.?limit/i.test(message)
@@ -558,9 +513,7 @@ export class SlackBuddy extends Think<Env> {
 	 */
 	async diagnostics(): Promise<Record<string, unknown>> {
 		const servers = this.getMcpServers();
-		const { tools, missing } = applyToolPolicy(
-			this.mcp.getAITools({ serverId: MCP_SERVER_ID }),
-		);
+		const { tools, missing } = applyToolPolicy(this.mcp.getAITools({ serverId: MCP_SERVER_ID }));
 		const schedules = (await this.listSchedules()) as Array<{
 			callback?: string;
 			time?: number;
@@ -664,15 +617,12 @@ export class SlackBuddy extends Think<Env> {
 	 * agent keeps polling at burst rate into a wall of 429s and never recovers.
 	 */
 	private noteIfRateLimited(error: unknown): boolean {
-		const text =
-			error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+		const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 		if (!/429|too many requests|rate.?limit/i.test(text)) return false;
 
 		const until = Date.now() + RATE_LIMIT_BACKOFF_MS;
 		this.store.setCursor(RATE_LIMITED_UNTIL, until.toString());
-		console.warn(
-			`Upstream rate limited; polling backs off until ${new Date(until).toISOString()}`,
-		);
+		console.warn(`Upstream rate limited; polling backs off until ${new Date(until).toISOString()}`);
 
 		// A 429 from the AI SDK is the model, not the gateway. Those are
 		// different failures: the gateway answers fine while third-party model
@@ -681,9 +631,7 @@ export class SlackBuddy extends Think<Env> {
 		if (/AI_APICallError|AI_RetryError/.test(text)) {
 			const modelUntil = Date.now() + MODEL_FALLBACK_MS;
 			this.store.setCursor(MODEL_FALLBACK_UNTIL, modelUntil.toString());
-			console.warn(
-				`Primary model unavailable; using ${this.env.MODEL_FALLBACK_ID} until ${new Date(modelUntil).toISOString()}`,
-			);
+			console.warn(`Primary model unavailable; using ${this.env.MODEL_FALLBACK_ID} until ${new Date(modelUntil).toISOString()}`);
 		}
 		return true;
 	}
@@ -719,9 +667,7 @@ export class SlackBuddy extends Think<Env> {
 				newestTop = message.ts;
 			}
 
-			const isNew =
-				(!cursor || Number(message.ts) > Number(cursor)) &&
-				!store.isSent(message.ts);
+			const isNew = (!cursor || Number(message.ts) > Number(cursor)) && !store.isSent(message.ts);
 			if (isNew && message.text) {
 				candidates.push({
 					ts: message.ts,
@@ -736,11 +682,7 @@ export class SlackBuddy extends Think<Env> {
 		// and filter before capping: the read window now spans the briefing, so
 		// quiet threads must not use up the slots of one that just changed.
 		const active = top
-			.filter(
-				(m) =>
-					m.threadLatest !== null &&
-					store.getCursor(threadSignatureKey(m.ts)) !== m.threadLatest,
-			)
+			.filter((m) => m.threadLatest !== null && store.getCursor(threadSignatureKey(m.ts)) !== m.threadLatest)
 			.slice(0, MAX_THREADS_PER_POLL);
 
 		for (const parent of active) {
@@ -779,11 +721,7 @@ export class SlackBuddy extends Think<Env> {
 		store.setCursor(LAST_ACTIVITY, Date.now().toString());
 	}
 
-	private async respondTo(
-		candidate: Candidate,
-		slack: SlackClient,
-		dm: string,
-	): Promise<void> {
+	private async respondTo(candidate: Candidate, slack: SlackClient, dm: string): Promise<void> {
 		const store = this.store;
 
 		// Best-effort acknowledgement. Within one tick this is what makes the
@@ -955,10 +893,7 @@ export class SlackBuddy extends Think<Env> {
 		const store = this.store;
 		const now = Date.now();
 		const focus = store.focusChannels();
-		const exclude = new Set([
-			...focus.map((c) => c.channelId),
-			...store.focusSuggestedSince(now - FOCUS_TIP_COOLDOWN_MS),
-		]);
+		const exclude = new Set([...focus.map((c) => c.channelId), ...store.focusSuggestedSince(now - FOCUS_TIP_COOLDOWN_MS)]);
 		return suggestFocusChannel(tallyChannels(store.briefingItemsSince(now - FOCUS_TIP_WINDOW_MS)), {
 			exclude,
 			full: focus.length >= MAX_FOCUS_CHANNELS,
@@ -1051,20 +986,10 @@ export class SlackBuddy extends Think<Env> {
 			if (advanceCursor) store.setCursor(LAST_DIGEST, Date.now().toString());
 			if (suggestion) store.markFocusSuggested(suggestion.channelId, suggestion.name ?? "");
 			this.settleMissed(since);
-			store.finishDigestRun(
-				runId,
-				"ok",
-				briefing.items.length,
-				describeStats({ ...result.stats, surfaced: briefing.items.length }),
-			);
+			store.finishDigestRun(runId, "ok", briefing.items.length, describeStats({ ...result.stats, surfaced: briefing.items.length }));
 		} catch (error) {
 			this.noteIfRateLimited(error);
-			store.finishDigestRun(
-				runId,
-				"failed",
-				0,
-				error instanceof Error ? error.message : String(error),
-			);
+			store.finishDigestRun(runId, "failed", 0, error instanceof Error ? error.message : String(error));
 			throw error;
 		}
 	}

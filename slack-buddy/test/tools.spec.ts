@@ -1,11 +1,6 @@
 import type { ToolSet } from "ai";
 import { describe, expect, it } from "vitest";
-import {
-	READ_ONLY_ALLOWLIST,
-	READ_ONLY_TOOLS,
-	WRITE_TOOLS,
-	applyToolPolicy,
-} from "../src/slack/tools";
+import { READ_ONLY_ALLOWLIST, READ_ONLY_TOOLS, WRITE_TOOLS, applyToolPolicy } from "../src/slack/tools";
 
 /**
  * The tool policy is the security boundary of this design. Think's
@@ -16,8 +11,7 @@ import {
 
 const stub = () => ({ description: "", inputSchema: {}, execute: async () => ({}) });
 
-const toolSetFrom = (names: string[]): ToolSet =>
-	Object.fromEntries(names.map((n) => [n, stub()])) as unknown as ToolSet;
+const toolSetFrom = (names: string[]): ToolSet => Object.fromEntries(names.map((n) => [n, stub()])) as unknown as ToolSet;
 
 const ns = (name: string) => `tool_slack_${name}`;
 
@@ -77,9 +71,7 @@ describe("applyToolPolicy", () => {
 	});
 
 	it("keeps read and write sets disjoint and complete", () => {
-		const overlap = READ_ONLY_TOOLS.filter((t) =>
-			(WRITE_TOOLS as readonly string[]).includes(t),
-		);
+		const overlap = READ_ONLY_TOOLS.filter((t) => (WRITE_TOOLS as readonly string[]).includes(t));
 		expect(overlap).toEqual([]);
 		expect(READ_ONLY_TOOLS.length + WRITE_TOOLS.length).toBe(19);
 	});

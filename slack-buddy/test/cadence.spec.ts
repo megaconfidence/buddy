@@ -14,10 +14,8 @@ import {
 const TZ = "Europe/London";
 
 // 2026-09-17 is a Thursday. September is BST, so UTC+1.
-const thursday = (utcHour: number) =>
-	new Date(Date.UTC(2026, 8, 17, utcHour, 0, 0));
-const saturday = (utcHour: number) =>
-	new Date(Date.UTC(2026, 8, 19, utcHour, 0, 0));
+const thursday = (utcHour: number) => new Date(Date.UTC(2026, 8, 17, utcHour, 0, 0));
+const saturday = (utcHour: number) => new Date(Date.UTC(2026, 8, 19, utcHour, 0, 0));
 
 describe("isWorkingHours", () => {
 	it("treats a weekday mid-morning as working hours", () => {
@@ -43,9 +41,7 @@ describe("nextPollDelaySeconds", () => {
 	const base = { timeZone: TZ, lastActivityAt: null, lastDigestAt: null };
 
 	it("polls every minute during working hours", () => {
-		expect(nextPollDelaySeconds({ ...base, now: thursday(10) })).toBe(
-			WORKING_SECONDS,
-		);
+		expect(nextPollDelaySeconds({ ...base, now: thursday(10) })).toBe(WORKING_SECONDS);
 	});
 
 	it("backs off overnight", () => {
@@ -76,9 +72,7 @@ describe("nextPollDelaySeconds", () => {
 
 	it("bursts after the digest, when a reply is likely", () => {
 		const now = thursday(7);
-		expect(
-			nextPollDelaySeconds({ ...base, now, lastDigestAt: now.getTime() - 60_000 }),
-		).toBe(BURST_SECONDS);
+		expect(nextPollDelaySeconds({ ...base, now, lastDigestAt: now.getTime() - 60_000 })).toBe(BURST_SECONDS);
 	});
 
 	it("lets a late-night conversation override the idle calendar", () => {
@@ -198,9 +192,7 @@ describe("rate-limit backoff", () => {
 
 	it("is unaffected when no backoff is recorded", () => {
 		const now = thursday(10);
-		expect(
-			nextPollDelaySeconds({ ...base, now, rateLimitedUntil: null }),
-		).toBe(WORKING_SECONDS);
+		expect(nextPollDelaySeconds({ ...base, now, rateLimitedUntil: null })).toBe(WORKING_SECONDS);
 	});
 });
 

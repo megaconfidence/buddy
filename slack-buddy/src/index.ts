@@ -45,9 +45,7 @@ export default {
 					const hours = Number(url.searchParams.get("hours"));
 					await agent.runDailyDigest(
 						`manual-${Date.now()}`,
-						Number.isFinite(hours) && hours > 0
-							? Date.now() - hours * 3_600_000
-							: undefined,
+						Number.isFinite(hours) && hours > 0 ? Date.now() - hours * 3_600_000 : undefined,
 					);
 				}
 
@@ -72,10 +70,7 @@ export default {
 			}
 		}
 
-		return (
-			(await routeAgentRequest(request, env)) ??
-			new Response("Not found", { status: 404 })
-		);
+		return (await routeAgentRequest(request, env)) ?? new Response("Not found", { status: 404 });
 	},
 
 	/**

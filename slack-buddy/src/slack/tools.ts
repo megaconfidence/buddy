@@ -6,8 +6,7 @@ import type { ToolSet } from "ai";
  */
 export const MCP_SERVER_ID = "slack";
 
-const namespace = (tool: string) =>
-	`tool_${MCP_SERVER_ID.replace(/-/g, "")}_${tool}`;
+const namespace = (tool: string) => `tool_${MCP_SERVER_ID.replace(/-/g, "")}_${tool}`;
 
 /**
  * The only gateway tools the model may call. All are read-only.
@@ -43,9 +42,7 @@ export const WRITE_TOOLS = [
 	"slack_update_canvas",
 ] as const;
 
-export const READ_ONLY_ALLOWLIST: ReadonlySet<string> = new Set(
-	READ_ONLY_TOOLS.map(namespace),
-);
+export const READ_ONLY_ALLOWLIST: ReadonlySet<string> = new Set(READ_ONLY_TOOLS.map(namespace));
 
 const FORBIDDEN: ReadonlySet<string> = new Set(WRITE_TOOLS.map(namespace));
 
@@ -90,9 +87,7 @@ export function applyToolPolicy(all: ToolSet): ToolPolicyResult {
 	// That is a genuine policy failure and must stop the turn.
 	const leaked = Object.keys(tools).filter((n) => FORBIDDEN.has(n));
 	if (leaked.length > 0) {
-		throw new ToolPolicyError(
-			`Write-capable tools reached the model tool set: ${leaked.join(", ")}`,
-		);
+		throw new ToolPolicyError(`Write-capable tools reached the model tool set: ${leaked.join(", ")}`);
 	}
 
 	return {

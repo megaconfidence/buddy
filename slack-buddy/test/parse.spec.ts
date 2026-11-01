@@ -94,10 +94,7 @@ describe("parseConversation", () => {
 	it("parses a thread into parent plus replies", () => {
 		const messages = parseConversation(THREAD_READ);
 
-		expect(messages.map((m) => m.ts)).toEqual([
-			"1789674413.379719",
-			"1789674434.430189",
-		]);
+		expect(messages.map((m) => m.ts)).toEqual(["1789674413.379719", "1789674434.430189"]);
 		expect(messages[1].text).toBe("threaded reply — loop-guard check");
 	});
 
@@ -105,9 +102,7 @@ describe("parseConversation", () => {
 		// This is why threading alone cannot guard the loop and the sent
 		// ledger is required. Regression test for a real design defect.
 		const messages = parseConversation(THREAD_READ);
-		expect(new Set(messages.map((m) => m.authorId))).toEqual(
-			new Set(["U0BUM44636U"]),
-		);
+		expect(new Set(messages.map((m) => m.authorId))).toEqual(new Set(["U0BUM44636U"]));
 	});
 });
 
@@ -129,9 +124,7 @@ describe("parseSearchResults", () => {
 
 	it("stops the body at the context block", () => {
 		const hits = parseSearchResults(SEARCH);
-		expect(hits[0].text).toBe(
-			"Mistral-defense Group has been set on the Wiz Google SAML settings.",
-		);
+		expect(hits[0].text).toBe("Mistral-defense Group has been set on the Wiz Google SAML settings.");
 		expect(hits[0].text).not.toContain("Thanks a lot");
 	});
 
@@ -239,7 +232,9 @@ describe("buildPermalink", () => {
 	it("supports Enterprise Grid hosts, which have an extra label", () => {
 		// Regression: a one-label host pattern rejected every live permalink.
 		const host = "acme.enterprise.slack.com";
-		expect(workspaceHostOf(`https://${host}/archives/C083YJ8348H/p1789672700289059?thread_ts=1789486066.556089&cid=C083YJ8348H`)).toBe(host);
+		expect(workspaceHostOf(`https://${host}/archives/C083YJ8348H/p1789672700289059?thread_ts=1789486066.556089&cid=C083YJ8348H`)).toBe(
+			host,
+		);
 		expect(buildPermalink(host, "C083YJ8348H", "1789672700.289059")).toBe(`https://${host}/archives/C083YJ8348H/p1789672700289059`);
 	});
 });
@@ -264,8 +259,7 @@ describe("isSlackPermalink", () => {
 });
 
 describe("permalinkMatches", () => {
-	const link =
-		"https://mistralai.slack.com/archives/C083YJ8348H/p1789672700289059?thread_ts=1789486066.556089&cid=C083YJ8348H";
+	const link = "https://mistralai.slack.com/archives/C083YJ8348H/p1789672700289059?thread_ts=1789486066.556089&cid=C083YJ8348H";
 
 	it("accepts a link matching its own channel and timestamp", () => {
 		expect(permalinkMatches(link, "C083YJ8348H", "1789672700.289059")).toBe(true);

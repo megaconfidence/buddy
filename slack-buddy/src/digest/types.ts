@@ -162,9 +162,7 @@ export type DigestStats = {
 	failedBatches: number;
 };
 
-export type DigestResult =
-	| { status: "empty"; stats: DigestStats }
-	| { status: "ok"; briefing: Briefing; stats: DigestStats };
+export type DigestResult = { status: "empty"; stats: DigestStats } | { status: "ok"; briefing: Briefing; stats: DigestStats };
 
 export const emptyStats = (): DigestStats => ({
 	searches: 0,

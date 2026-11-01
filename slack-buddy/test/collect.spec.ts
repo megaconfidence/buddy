@@ -72,7 +72,9 @@ describe("groupHits", () => {
 	});
 
 	it("remembers which messages the mention search returned", () => {
-		const [conv] = groupHits([{ hit: hit(ts(10), "U1", { text: "@Confidence can you look?" }), term: MENTION_TERM, mention: true }]).values();
+		const [conv] = groupHits([
+			{ hit: hit(ts(10), "U1", { text: "@Confidence can you look?" }), term: MENTION_TERM, mention: true },
+		]).values();
 		expect(conv.messages[0].mentionsOwner).toBe(true);
 	});
 });
@@ -249,7 +251,11 @@ describe("scoreConversation", () => {
 describe("collectConversations", () => {
 	type Search = (args: { keywords: string[]; filters?: string; cursor?: string }) => { hits: SearchHit[]; nextCursor: string | null };
 
-	function fakeClient(opts: { search?: Search; thread?: (channelId: string, rootTs: string) => SlackMessage[]; channel?: (id: string) => SlackMessage[] }) {
+	function fakeClient(opts: {
+		search?: Search;
+		thread?: (channelId: string, rootTs: string) => SlackMessage[];
+		channel?: (id: string) => SlackMessage[];
+	}) {
 		const calls = {
 			search: [] as Array<{ keywords: string[]; filters?: string; cursor?: string }>,
 			thread: [] as string[],
@@ -273,7 +279,10 @@ describe("collectConversations", () => {
 		return { client, calls };
 	}
 
-	const collect = (client: Pick<SlackClient, "searchJoined" | "readChannel" | "readThread">, extra: Partial<Parameters<typeof collectConversations>[0]> = {}) =>
+	const collect = (
+		client: Pick<SlackClient, "searchJoined" | "readChannel" | "readThread">,
+		extra: Partial<Parameters<typeof collectConversations>[0]> = {},
+	) =>
 		collectConversations({
 			client,
 			plan: [[`<@${OWNER}>`], ["Vibe"]],
@@ -289,7 +298,8 @@ describe("collectConversations", () => {
 	it("reads the thread behind a keyword hit, so the model sees the whole discussion", async () => {
 		const root = ts(10);
 		const { client, calls } = fakeClient({
-			search: (args) => (args.keywords[0] === "Vibe" ? { hits: [hit(ts(20), "U2", { threadTs: root })], nextCursor: null } : { hits: [], nextCursor: null }),
+			search: (args) =>
+				args.keywords[0] === "Vibe" ? { hits: [hit(ts(20), "U2", { threadTs: root })], nextCursor: null } : { hits: [], nextCursor: null },
 			thread: () => [
 				slackMessage(root, "U1", "Vibe 2.0 launch plan"),
 				slackMessage(ts(20), "U2", "GA moves to 19 Nov"),
@@ -308,7 +318,9 @@ describe("collectConversations", () => {
 	it("prefers the thread read's full text over a shortened search result", async () => {
 		const { client } = fakeClient({
 			search: (args) =>
-				args.keywords[0] === "Vibe" ? { hits: [hit(ts(20), "U2", { text: "GA moves to…" })], nextCursor: null } : { hits: [], nextCursor: null },
+				args.keywords[0] === "Vibe"
+					? { hits: [hit(ts(20), "U2", { text: "GA moves to…" })], nextCursor: null }
+					: { hits: [], nextCursor: null },
 			thread: () => [slackMessage(ts(20), "U2", "GA moves to 19 Nov, and DevRel should prepare a launch demo")],
 		});
 		const { candidates } = await collect(client);
@@ -347,7 +359,11 @@ describe("collectConversations", () => {
 						: { hits: [], nextCursor: null },
 			thread: (_, rootTs) =>
 				rootTs === root
-					? [slackMessage(root, "U1", "Vibe 2.0 launch plan"), slackMessage(ts(20), "U2", "GA 19 Nov?"), slackMessage(ts(30), OWNER, "Confirmed")]
+					? [
+							slackMessage(root, "U1", "Vibe 2.0 launch plan"),
+							slackMessage(ts(20), "U2", "GA 19 Nov?"),
+							slackMessage(ts(30), OWNER, "Confirmed"),
+						]
 					: [slackMessage(rootTs, OWNER, "My own note about Vibe")],
 		});
 
@@ -359,8 +375,12 @@ describe("collectConversations", () => {
 	it("finds replies to the owner's own posts", async () => {
 		const root = ts(10);
 		const { client } = fakeClient({
-			search: (args) => (args.filters ? { hits: [hit(root, OWNER, { threadTs: root })], nextCursor: null } : { hits: [], nextCursor: null }),
-			thread: () => [slackMessage(root, OWNER, "Does OCR handle handwriting?"), slackMessage(ts(30), "U1", "Yes, as of last week's model update")],
+			search: (args) =>
+				args.filters ? { hits: [hit(root, OWNER, { threadTs: root })], nextCursor: null } : { hits: [], nextCursor: null },
+			thread: () => [
+				slackMessage(root, OWNER, "Does OCR handle handwriting?"),
+				slackMessage(ts(30), "U1", "Yes, as of last week's model update"),
+			],
 		});
 
 		const { candidates } = await collect(client);
@@ -448,7 +468,9 @@ describe("search paging and pacing", () => {
 				// Distinct messages per query and page, so nothing deduplicates away.
 				const page = Number(args.cursor ?? "0");
 				const author = args.filters ? OWNER : "U1";
-				const hits = Array.from({ length: 20 }, (_, i) => hit(ts(call * 100 + i + 1), author, { text: `${query} page ${page} message ${i} with enough words` }));
+				const hits = Array.from({ length: 20 }, (_, i) =>
+					hit(ts(call * 100 + i + 1), author, { text: `${query} page ${page} message ${i} with enough words` }),
+				);
 				return { hits, nextCursor: String(page + 1) };
 			},
 			readThread: async () => {
@@ -476,7 +498,11 @@ describe("search paging and pacing", () => {
 		};
 	}
 
-	const run = (client: Pick<SlackClient, "searchJoined" | "readChannel" | "readThread">, plan: string[][], pace: ReturnType<typeof fakePace>["pace"]) =>
+	const run = (
+		client: Pick<SlackClient, "searchJoined" | "readChannel" | "readThread">,
+		plan: string[][],
+		pace: ReturnType<typeof fakePace>["pace"],
+	) =>
 		collectConversations({
 			client,
 			plan,
@@ -532,7 +558,11 @@ describe("search paging and pacing", () => {
 	it("never makes more than ten searches in any minute", async () => {
 		const pacing = fakePace();
 		const { client, calls } = endlessClient({ clock: pacing.now });
-		await run(client, [[`<@${OWNER}>`], ["devrel"], ["OCR"], ["Vibe"], ["Le Chat"], ["Codestral"], ["launch"], ["blog"], ["beta"]], pacing.pace);
+		await run(
+			client,
+			[[`<@${OWNER}>`], ["devrel"], ["OCR"], ["Vibe"], ["Le Chat"], ["Codestral"], ["launch"], ["blog"], ["beta"]],
+			pacing.pace,
+		);
 
 		expect(pacing.sleeps.length).toBeGreaterThan(0);
 		const times = calls.map((c) => c.at);

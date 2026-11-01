@@ -68,7 +68,13 @@ describe("tallyChannels", () => {
 });
 
 describe("suggestFocusChannel", () => {
-	const tally = (channelId: string, briefings: number, useful = 0, noise = 0) => ({ channelId, name: channelId.toLowerCase(), briefings, useful, noise });
+	const tally = (channelId: string, briefings: number, useful = 0, noise = 0) => ({
+		channelId,
+		name: channelId.toLowerCase(),
+		briefings,
+		useful,
+		noise,
+	});
 	const none = new Set<string>();
 
 	it("suggests a channel that keeps feeding briefings", () => {
