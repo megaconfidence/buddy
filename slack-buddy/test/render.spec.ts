@@ -88,7 +88,21 @@ describe("renderBriefing", () => {
 	});
 
 	it("numbers every item so the owner can reply about it", () => {
-		for (const i of typical.items) expect(text).toContain(`- **${i.number}** `);
+		for (const i of typical.items) expect(text).toContain(`\n**${i.number}.** `);
+	});
+
+	it("uses no list syntax, which Slack would restyle", () => {
+		// Slack adds bullets to a list and keeps no blank line after one.
+		expect(text).not.toMatch(/^\s*(?:[-*+•]|\d+[.)])\s/m);
+	});
+
+	it("puts each heading directly above its items, with a blank line between sections", () => {
+		const news = text.split("\n\n").find((block) => block.startsWith("**What's new**"));
+		expect(news?.split("\n")).toEqual([
+			"**What's new**",
+			expect.stringMatching(/^\*\*2\.\*\* Vibe 2\.0 GA moved/),
+			expect.stringMatching(/^\*\*3\.\*\* _Update:_ Le Chat/),
+		]);
 	});
 
 	it("links each item to its sources in the message itself", () => {
@@ -121,7 +135,7 @@ describe("renderBriefing", () => {
 		evil.sources[0].permalink = "https://evil.example/archives/C1/p1";
 		const line = renderBriefing({ tldr: "", items: [evil] }, ctx);
 		expect(line).not.toContain("evil.example");
-		expect(line).toContain("- **1** News · #vibe");
+		expect(line).toContain("**1.** News · #vibe");
 	});
 
 	it("says what it covered and how to reply", () => {

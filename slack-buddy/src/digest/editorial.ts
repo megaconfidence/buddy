@@ -58,8 +58,8 @@ const truncate = (text: string, max: number) => (text.length <= max ? text : `${
  * Model output is derived from untrusted channel content, so it must not be
  * able to carry a link: link syntax and URLs are removed, and a zero-width
  * space after each dot stops Slack auto-linking a bare domain such as
- * `example.com`. Text is collapsed to one line so it cannot break the list
- * structure around it.
+ * `example.com`. Text is collapsed to one line, since each item is one line
+ * of the message.
  */
 export function sanitizeText(value: string | null | undefined, max: number): string {
 	const text = (value ?? "")

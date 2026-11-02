@@ -51,6 +51,16 @@ gateway's tool names match Slack's own MCP server, whose published rate limits a
 | Reads are cheap   | `slack_read_channel` and `slack_read_thread` are Tier 3, 50+ a minute; a thread read returns up to 1,000 messages.                                                                |
 | Model             | `glm-5-2` accepted both structured-output schemas. A 24-hour Sunday window ran end to end in 18 s: 9 searches, 6 thread reads, 2 model calls.                                     |
 
+### Probed 2026-11-02, for the briefing's layout
+
+Two labelled test replies in the owner's DM, read back with `slack_read_thread`.
+
+| Fact         | Detail                                                                                                                                                             |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Lists        | Markdown lists become list blocks. `-` renders as `•`, and no blank line survives after a list, so whatever follows sits directly under its last item.             |
+| List numbers | An ordered list keeps its start number, so `3.` stays 3, but only after a blank line. Directly under a paragraph line it stays plain text, as CommonMark requires. |
+| Line breaks  | Single newlines inside a paragraph stay line breaks, and blank lines between paragraphs are kept.                                                                  |
+
 ## Shape
 
 ```
@@ -350,6 +360,12 @@ Each item links its sources inline, up to two and one per channel, and a source
 without a valid permalink is named but not linked. A first version put the sources in
 a thread reply to keep Slack's link previews out of the briefing, since the send tool
 cannot turn them off. The owner preferred the links in place, previews and all.
+
+Each item is one line led by a bold number, under its section's bold heading, with a
+blank line between sections. A first version used a Markdown list, which Slack showed
+with a bullet in front of every number and no gap after each section, so the briefing
+read as one block. A numbered list would keep the numbers but still lose the gap. The
+cost of plain lines is that a wrapped item has no hanging indent.
 
 The message is rendered within 4,500 characters, under the 5,000 limit. An Enterprise
 Grid permalink is about 120 characters, so links give way first: one per item instead

@@ -107,19 +107,23 @@ function sourceLinks(item: BriefingItem, maxLinks: number): string {
 function renderItem(item: BriefingItem, maxLinks: number): string {
 	const links = sourceLinks(item, maxLinks);
 	const suffix = links ? ` · ${links}` : "";
-	const n = `**${item.number}**`;
+	// A plain line led by a bold number, not a Markdown list. Slack turns a
+	// list into a block of its own: bullets appear in front of the numbers,
+	// and no blank line survives after it, so a section runs into the next
+	// heading. Plain lines keep their line breaks and blank lines.
+	const n = `**${item.number}.**`;
 
 	switch (item.section) {
 		case "needs_you":
-			return `- ${n} ${item.text}${suffix}`;
+			return `${n} ${item.text}${suffix}`;
 		case "whats_new": {
 			const update = item.isUpdate ? "_Update:_ " : "";
 			const certainty = item.certainty && item.certainty !== "confirmed" ? ` _(${item.certainty})_` : "";
-			return `- ${n} ${update}${item.text}${certainty}${suffix}`;
+			return `${n} ${update}${item.text}${certainty}${suffix}`;
 		}
 		case "opportunity": {
 			const text = item.nextStep ? `${sentence(item.text)} _Next: ${item.nextStep}_` : item.text;
-			return `- ${n} ${text}${suffix}`;
+			return `${n} ${text}${suffix}`;
 		}
 		case "content_idea": {
 			const meta = [item.format ? FORMAT_LABELS[item.format] : null, item.effort ? `${item.effort} effort` : null]
@@ -127,7 +131,7 @@ function renderItem(item: BriefingItem, maxLinks: number): string {
 				.join(", ");
 			const hook = item.hook ? ` — ${item.whyNow ? sentence(item.hook) : item.hook}` : "";
 			const why = item.whyNow ? ` _Why now: ${item.whyNow}_` : "";
-			return `- ${n} **${item.text}**${meta ? ` (${meta})` : ""}${hook}${why}${suffix}`;
+			return `${n} **${item.text}**${meta ? ` (${meta})` : ""}${hook}${why}${suffix}`;
 		}
 	}
 }
