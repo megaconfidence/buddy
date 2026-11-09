@@ -6,6 +6,8 @@ import {
 	RATE_LIMITED_SECONDS,
 	WORKING_SECONDS,
 	choosePollSchedule,
+	inboxBaseline,
+	isOwnerInput,
 	isWorkingHours,
 	nextPollDelaySeconds,
 	pollReadOldest,
@@ -219,5 +221,41 @@ describe("pollReadOldest", () => {
 	it("changes nothing before the first briefing or the first poll", () => {
 		expect(pollReadOldest({ cursor: later, briefingTs: null, nowSec })).toBe(later);
 		expect(pollReadOldest({ cursor: null, briefingTs: briefing, nowSec })).toBeNull();
+	});
+});
+
+describe("isOwnerInput", () => {
+	const owner = "U0BUM44636U";
+
+	it("answers the owner and never the workflow that posts in the same DM", () => {
+		expect(isOwnerInput(owner, owner)).toBe(true);
+		expect(isOwnerInput("B0CG6NCNEFK", owner)).toBe(false);
+	});
+
+	it("still answers a message whose author could not be read", () => {
+		expect(isOwnerInput(null, owner)).toBe(true);
+	});
+});
+
+describe("inboxBaseline", () => {
+	const top = [
+		{ ts: "1794237919.953719", threadLatest: null },
+		{ ts: "1794237599.484839", threadLatest: "Mon 9 Nov 14:00 GMT" },
+		{ ts: "1794237170.594569", threadLatest: null },
+	];
+	const nowSec = 1794238000.5;
+
+	it("starts after the newest message, so nothing already there is answered", () => {
+		expect(inboxBaseline(top, nowSec).cursor).toBe("1794237919.953719");
+	});
+
+	it("records every thread as it stands, with replies before now already handled", () => {
+		const baseline = inboxBaseline(top, nowSec);
+		expect(baseline.threads).toEqual([{ parentTs: "1794237599.484839", signature: "Mon 9 Nov 14:00 GMT" }]);
+		expect(baseline.watermark).toBe("1794238000.500000");
+	});
+
+	it("starts from now in an empty DM", () => {
+		expect(inboxBaseline([], nowSec)).toEqual({ cursor: "1794238000.500000", threads: [], watermark: "1794238000.500000" });
 	});
 });

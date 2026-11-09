@@ -1,5 +1,5 @@
 /**
- * Adaptive poll cadence.
+ * Adaptive poll cadence, and what each poll reads.
  *
  * There is no push path from Slack without a Slack app, so responsiveness is
  * bought with poll frequency. A flat 10s poll costs ~8,640 gateway calls a day;
@@ -128,6 +128,36 @@ export function pollReadOldest(opts: { cursor: string | null; briefingTs: string
 	// One second early, so the parent is included whether or not `oldest` is inclusive.
 	const watch = (Number(briefingTs) - 1).toFixed(6);
 	return Number(watch) < Number(cursor) ? watch : cursor;
+}
+
+/**
+ * Whether a message in the owner's DM is the owner's input.
+ *
+ * The workflow that notifies the owner posts into the same DM, as a bot, and
+ * its messages must never be answered. An unknown author still counts, as it
+ * did before authors were checked, so a parsing change cannot silence the
+ * agent. The agent's own messages carry the owner's id too; `sent_ledger`
+ * rules those out.
+ */
+export function isOwnerInput(authorId: string | null, ownerId: string): boolean {
+	return authorId === null || authorId === ownerId;
+}
+
+/**
+ * Where a DM stands on the agent's first read of it: its newest top-level
+ * message, and the reply signature of every thread in view. Recording these
+ * and answering nothing keeps a move to a new DM from replaying its history.
+ * Thread watermarks move to now, so a thread that moves later is answered
+ * from its new replies only.
+ */
+export function inboxBaseline(
+	top: Array<{ ts: string; threadLatest: string | null }>,
+	nowSec: number,
+): { cursor: string; threads: Array<{ parentTs: string; signature: string }>; watermark: string } {
+	const now = nowSec.toFixed(6);
+	const newest = top.reduce<string | null>((max, m) => (max === null || Number(m.ts) > Number(max) ? m.ts : max), null);
+	const threads = top.flatMap((m) => (m.threadLatest === null ? [] : [{ parentTs: m.ts, signature: m.threadLatest }]));
+	return { cursor: newest ?? now, threads, watermark: now };
 }
 
 export function nextPollDelaySeconds(opts: {

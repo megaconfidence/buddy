@@ -14,15 +14,20 @@
 	"upload_source_maps": true,
 
 	/**
-	 * MISTRAL_API_KEY is a secret, not a var. It authenticates both the MCP
-	 * gateway and the model.
-	 *   production: wrangler secret put MISTRAL_API_KEY
-	 *   local:      .dev.vars
+	 * Secrets, not vars:
+	 *   MISTRAL_API_KEY     authenticates both the MCP gateway and the model.
+	 *   SLACK_WORKFLOW_URL  optional: the Slack workflow that notifies the owner.
+	 *   production: wrangler secret put <NAME>
+	 *   local:      .env
+	 *
+	 * OWNER_DM_CHANNEL_ID is where the agent talks with the owner: the DM the
+	 * notifying workflow posts in, so briefings and notifications sit together.
+	 * Without a workflow, the owner's self-DM (D0BTQQF7WCW) works too.
 	 */
 	"vars": {
 		"MCP_GATEWAY_URL": "https://api.mistral.ai/v1/connectors-gateway/slack/mcp",
 		"OWNER_SLACK_USER_ID": "U0BUM44636U",
-		"OWNER_DM_CHANNEL_ID": "D0BTQQF7WCW",
+		"OWNER_DM_CHANNEL_ID": "D0CG8GT74Q4",
 		"OWNER_TIMEZONE": "Europe/London",
 		"MODEL_BASE_URL": "https://api.mistral.ai/v1",
 		"MODEL_ID": "glm-5-2",

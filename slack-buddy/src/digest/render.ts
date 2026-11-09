@@ -211,16 +211,20 @@ export function fitBriefing(briefing: Briefing, ctx: RenderContext, budget = MES
 	return { briefing: current, text };
 }
 
-/** Quiet days get one line, not silence: silence reads as a broken agent. */
-export function renderQuiet(ctx: RenderContext): string {
+function quietDetail(ctx: RenderContext): string {
 	const s = ctx.stats;
 	const since = formatSince(ctx.since, ctx.now, ctx.timeZone);
-	const detail =
-		(s.messages === 0
+	const read =
+		s.messages === 0
 			? `No new messages in your channels since ${since}.`
-			: `Read ${plural(s.messages, "message")} across ${plural(s.channels, "channel")} since ${since}.`) + partial(s);
+			: `Read ${plural(s.messages, "message")} across ${plural(s.channels, "channel")} since ${since}.`;
+	return read + partial(s);
+}
+
+/** Quiet days get one line, not silence: silence reads as a broken agent. */
+export function renderQuiet(ctx: RenderContext): string {
 	const note = ctx.note ? `\n_${ctx.note}_` : "";
-	return `**${heading(ctx)}** — nothing worth surfacing.${note}\n_${detail}_`;
+	return `**${heading(ctx)}** — nothing worth surfacing.${note}\n_${quietDetail(ctx)}_`;
 }
 
 /** A briefing that did not go out, as told to the owner. */
@@ -257,20 +261,26 @@ export function renderFailure(notice: FailureNotice): string {
 	return `**${heading(notice)}** ${failureDetail(notice)}`;
 }
 
-// Notifications are plain text: they are read in a phone's notification, and
-// the workflow that sends them inserts them into a message of its own.
+// Notifications are plain text: the workflow that sends them inserts them as
+// typed, so Markdown would show as symbols.
 
-/** Says whether anything needs the owner before the summary. */
+/**
+ * Follows the briefing, which is posted as the owner and so raises no
+ * notification itself. Says whether anything needs the owner before the
+ * summary, since a lock screen shows only the start.
+ */
 export function briefingNotification(briefing: Briefing, ctx: RenderContext): string {
 	const asks = briefing.items.filter((i) => i.section === "needs_you").length;
 	const counts = plural(briefing.items.length, "item") + (asks > 0 ? `, ${asks} ${asks === 1 ? "needs" : "need"} you` : "");
 	return `${heading(ctx)}: ${counts}.${briefing.tldr ? ` ${briefing.tldr}` : ""}`;
 }
 
+/** The whole quiet-day message: the workflow sends it instead of a post in the DM. */
 export function quietNotification(ctx: RenderContext): string {
-	return `${heading(ctx)}: nothing worth surfacing.`;
+	return [`${heading(ctx)}: nothing worth surfacing.`, ctx.note, quietDetail(ctx)].filter(Boolean).join("\n");
 }
 
+/** The whole failure notice: the workflow sends it instead of a post in the DM. */
 export function failureNotification(notice: FailureNotice): string {
 	return `${heading(notice)} ${failureDetail(notice)}`;
 }

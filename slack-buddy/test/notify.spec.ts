@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { notifyOwner } from "../src/notify";
 
 const WORKFLOW_URL = "https://hooks.slack.com/triggers/T0000/1111/abcdef";
-const LINK = "https://acme.enterprise.slack.com/archives/D0BTQQF7WCW/p1793608223867809";
 
 /** A fetch double that records each request and answers with `respond()`. */
 function fakeFetch(respond: () => Response | Promise<Response>) {
@@ -21,26 +20,19 @@ describe("notifyOwner", () => {
 
 	it("does nothing without a workflow URL", async () => {
 		const { fetcher, calls } = fakeFetch(() => Response.json({ ok: true }));
-		expect(await notifyOwner(undefined, "text", LINK, fetcher)).toBe(false);
-		expect(await notifyOwner("", "text", LINK, fetcher)).toBe(false);
+		expect(await notifyOwner(undefined, "text", fetcher)).toBe(false);
+		expect(await notifyOwner("", "text", fetcher)).toBe(false);
 		expect(calls).toHaveLength(0);
 	});
 
-	it("posts the text as the workflow's message variable, with the link on its own line", async () => {
+	it("posts the text as the workflow's message variable", async () => {
 		const { fetcher, calls } = fakeFetch(() => Response.json({ ok: true }));
-		expect(await notifyOwner(WORKFLOW_URL, "Morning briefing · Mon 9 Nov: 3 items.", LINK, fetcher)).toBe(true);
+		expect(await notifyOwner(WORKFLOW_URL, "Morning briefing · Mon 9 Nov: 3 items.", fetcher)).toBe(true);
 		expect(calls).toHaveLength(1);
 		expect(calls[0].url).toBe(WORKFLOW_URL);
 		expect(calls[0].init.method).toBe("POST");
 		expect(new Headers(calls[0].init.headers).get("Content-Type")).toBe("application/json");
-		expect(JSON.parse(String(calls[0].init.body))).toEqual({ message: `Morning briefing · Mon 9 Nov: 3 items.\n${LINK}` });
-	});
-
-	it("leaves out a link that is not a Slack permalink", async () => {
-		const { fetcher, calls } = fakeFetch(() => Response.json({ ok: true }));
-		await notifyOwner(WORKFLOW_URL, "text", "https://evil.example/archives/C1/p1", fetcher);
-		await notifyOwner(WORKFLOW_URL, "text", null, fetcher);
-		expect(calls.map((c) => JSON.parse(String(c.init.body)).message)).toEqual(["text", "text"]);
+		expect(JSON.parse(String(calls[0].init.body))).toEqual({ message: "Morning briefing · Mon 9 Nov: 3 items." });
 	});
 
 	it("reports a refusal or a network failure without throwing, and keeps the URL out of the log", async () => {
@@ -49,9 +41,9 @@ describe("notifyOwner", () => {
 		const softRefusal = fakeFetch(() => Response.json({ ok: false, error: "workflow_not_published" }));
 		const unreachable = fakeFetch(() => Promise.reject(new TypeError(`fetch failed: ${WORKFLOW_URL}`)));
 
-		expect(await notifyOwner(WORKFLOW_URL, "text", null, refused.fetcher)).toBe(false);
-		expect(await notifyOwner(WORKFLOW_URL, "text", null, softRefusal.fetcher)).toBe(false);
-		expect(await notifyOwner(WORKFLOW_URL, "text", null, unreachable.fetcher)).toBe(false);
+		expect(await notifyOwner(WORKFLOW_URL, "text", refused.fetcher)).toBe(false);
+		expect(await notifyOwner(WORKFLOW_URL, "text", softRefusal.fetcher)).toBe(false);
+		expect(await notifyOwner(WORKFLOW_URL, "text", unreachable.fetcher)).toBe(false);
 
 		const logged = log.mock.calls.flat().join("\n");
 		expect(logged).toContain("invalid_workflow_input");

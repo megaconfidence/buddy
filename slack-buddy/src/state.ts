@@ -17,7 +17,6 @@ export type Sql = <T = Record<string, string | number | boolean | null>>(
 	...values: (string | number | boolean | null)[]
 ) => T[];
 
-export const TOP_LEVEL_CURSOR = "toplevel";
 export const LAST_ACTIVITY = "last_activity_at";
 export const LAST_DIGEST = "last_digest_at";
 export const LAST_MANUAL_BRIEFING = "last_manual_briefing_at";
@@ -40,6 +39,12 @@ export const SLACK_RECONNECT_ATTEMPTS = "slack_reconnect_attempts";
 export const MISSED_BRIEFING = "missed_briefing";
 /** `<ISO time> accepted|failed`: the last notification sent through the Slack workflow. */
 export const LAST_NOTIFICATION = "last_notification";
+
+/**
+ * Newest top-level message handled in a DM. Keyed by channel, so moving to
+ * another DM starts with a first read rather than another DM's position.
+ */
+export const topLevelCursorKey = (channelId: string) => `toplevel:${channelId}`;
 
 /**
  * Opaque `Thread: N replies (latest: ...)` value, used only to detect change.

@@ -3,7 +3,7 @@ import { Think, type ThinkScheduledTasks } from "@cloudflare/think";
 import { tool, type LanguageModel, type ToolSet } from "ai";
 import { z } from "zod";
 
-import { choosePollSchedule, nextPollDelaySeconds, pollReadOldest, type PendingSchedule } from "./cadence";
+import { choosePollSchedule, inboxBaseline, isOwnerInput, nextPollDelaySeconds, pollReadOldest, type PendingSchedule } from "./cadence";
 import { runDigest } from "./digest";
 import { MAX_FOCUS_CHANNELS } from "./digest/collect";
 import {
@@ -47,9 +47,9 @@ import {
 	SLACK_RECONNECT_AT,
 	SLACK_RECONNECT_ATTEMPTS,
 	Store,
-	TOP_LEVEL_CURSOR,
 	threadSignatureKey,
 	threadWatermarkKey,
+	topLevelCursorKey,
 } from "./state";
 
 const SEED_TOPICS = ["OCR", "Vibe"];
@@ -555,7 +555,7 @@ export class SlackBuddy extends Think<Env> {
 			focusChannels: this.store.focusChannels(),
 			workspaceHost: this.store.workspaceHost(),
 			cursors: {
-				topLevel: this.store.getCursor(TOP_LEVEL_CURSOR),
+				topLevel: this.store.getCursor(topLevelCursorKey(this.env.OWNER_DM_CHANNEL_ID)),
 				lastActivityAt: this.readInstant(LAST_ACTIVITY),
 				lastDigestAt: this.readInstant(LAST_DIGEST),
 				lastBriefingTs: this.store.getCursor(LAST_BRIEFING_TS),
@@ -674,7 +674,9 @@ export class SlackBuddy extends Think<Env> {
 		// Nothing to read while Slack is unreachable; the next tick tries again.
 		if (!(await this.healSlack())) return;
 
-		const cursor = store.getCursor(TOP_LEVEL_CURSOR);
+		const ownerId = this.env.OWNER_SLACK_USER_ID;
+		const cursorKey = topLevelCursorKey(dm);
+		const cursor = store.getCursor(cursorKey);
 		const oldest = pollReadOldest({
 			cursor,
 			briefingTs: store.getCursor(LAST_BRIEFING_TS),
@@ -685,15 +687,27 @@ export class SlackBuddy extends Think<Env> {
 			limit: INBOX_READ_LIMIT,
 		});
 
+		// The first read of a DM, such as after moving to a new one, only notes
+		// where it stands. Nothing written before the agent read it is answered.
+		if (cursor === null) {
+			const baseline = inboxBaseline(top, Date.now() / 1000);
+			for (const thread of baseline.threads) {
+				store.setCursor(threadSignatureKey(thread.parentTs), thread.signature);
+				store.setCursor(threadWatermarkKey(thread.parentTs), baseline.watermark);
+			}
+			store.setCursor(cursorKey, baseline.cursor);
+			return;
+		}
+
 		const candidates: Candidate[] = [];
 		let newestTop = cursor;
 
 		for (const message of top) {
-			if (!newestTop || Number(message.ts) > Number(newestTop)) {
+			if (Number(message.ts) > Number(newestTop)) {
 				newestTop = message.ts;
 			}
 
-			const isNew = (!cursor || Number(message.ts) > Number(cursor)) && !store.isSent(message.ts);
+			const isNew = Number(message.ts) > Number(cursor) && !store.isSent(message.ts) && isOwnerInput(message.authorId, ownerId);
 			if (isNew && message.text) {
 				candidates.push({
 					ts: message.ts,
@@ -720,6 +734,7 @@ export class SlackBuddy extends Think<Env> {
 			for (const reply of replies) {
 				if (Number(reply.ts) <= Number(watermark)) continue;
 				if (store.isSent(reply.ts)) continue;
+				if (!isOwnerInput(reply.authorId, ownerId)) continue;
 				if (!reply.text) continue;
 				candidates.push({
 					ts: reply.ts,
@@ -731,8 +746,8 @@ export class SlackBuddy extends Think<Env> {
 		}
 
 		if (candidates.length === 0) {
-			if (newestTop && newestTop !== cursor) {
-				store.setCursor(TOP_LEVEL_CURSOR, newestTop);
+			if (newestTop !== cursor) {
+				store.setCursor(cursorKey, newestTop);
 			}
 			return;
 		}
@@ -743,7 +758,7 @@ export class SlackBuddy extends Think<Env> {
 			await this.respondTo(candidate, slack, dm);
 		}
 
-		if (newestTop) store.setCursor(TOP_LEVEL_CURSOR, newestTop);
+		store.setCursor(cursorKey, newestTop);
 		store.setCursor(LAST_ACTIVITY, Date.now().toString());
 	}
 
@@ -856,7 +871,7 @@ export class SlackBuddy extends Think<Env> {
 					const timeZone = this.env.OWNER_TIMEZONE;
 					const title = briefingTitle(now, timeZone);
 					const notice = { title, now, timeZone, reason, retryAt: null, repeated: missed !== null, awaitingSlack: true };
-					await this.sendNotification(failureNotification(notice), null);
+					await this.sendNotification(failureNotification(notice));
 				}
 				return;
 			}
@@ -884,8 +899,6 @@ export class SlackBuddy extends Think<Env> {
 	 * announced and retried like the first.
 	 */
 	private async onBriefingFailed(since: number, error: unknown, scheduled: boolean): Promise<void> {
-		let notice: FailureNotice | null = null;
-		let link: string | null = null;
 		try {
 			const { reason } = describeFailure(error);
 			const missed = recordMissed(this.readMissed(), { since, at: Date.now(), reason });
@@ -902,7 +915,7 @@ export class SlackBuddy extends Think<Env> {
 
 			const now = new Date();
 			const timeZone = this.env.OWNER_TIMEZONE;
-			notice = {
+			const notice: FailureNotice = {
 				title: briefingTitle(now, timeZone),
 				now,
 				timeZone,
@@ -910,19 +923,14 @@ export class SlackBuddy extends Think<Env> {
 				retryAt: delay !== null ? new Date(now.getTime() + delay * 1000) : null,
 				repeated: !first,
 			};
-			const sent = await this.slack.sendMessage({
-				channelId: this.env.OWNER_DM_CHANNEL_ID,
-				text: renderFailure(notice),
-			});
-			this.store.recordSent(sent.ts);
+			// The workflow goes first: it does not go through the gateway, so
+			// it still reaches the owner when the gateway is what failed.
+			await this.announce(renderFailure(notice), failureNotification(notice));
 			this.writeMissed({ ...missed, notified: true });
-			link = sent.permalink;
 		} catch (notifyError) {
 			// Usually Slack itself failing: the catch-up says what was missed.
 			console.error("Could not report the failed briefing", notifyError);
 		}
-		// Sent even when the notice could not be posted: the workflow does not go through the gateway.
-		if (notice) await this.sendNotification(failureNotification(notice), link);
 	}
 
 	/**
@@ -944,13 +952,25 @@ export class SlackBuddy extends Think<Env> {
 	/**
 	 * Notify the owner through the Slack workflow, when one is configured.
 	 * Everything the agent posts is posted as the owner, so Slack raises no
-	 * notification of its own. Never throws.
+	 * notification of its own. Never throws; returns whether Slack accepted it.
 	 */
-	private async sendNotification(text: string, link: string | null): Promise<void> {
+	private async sendNotification(text: string): Promise<boolean> {
 		const url = this.workflowUrl;
-		if (!url) return;
-		const accepted = await notifyOwner(url, text, link);
+		if (!url) return false;
+		const accepted = await notifyOwner(url, text);
 		this.store.setCursor(LAST_NOTIFICATION, `${new Date().toISOString()} ${accepted ? "accepted" : "failed"}`);
+		return accepted;
+	}
+
+	/**
+	 * A one-line message, such as a quiet day or a failed briefing. The
+	 * workflow sends it when there is one, so it notifies without a copy
+	 * posted as the owner next to it; otherwise it is posted in the DM.
+	 */
+	private async announce(markdown: string, plain: string): Promise<void> {
+		if (await this.sendNotification(plain)) return;
+		const sent = await this.slack.sendMessage({ channelId: this.env.OWNER_DM_CHANNEL_ID, text: markdown });
+		this.store.recordSent(sent.ts);
 	}
 
 	/** A delivered briefing that covers a missed one's window settles it. */
@@ -1004,17 +1024,12 @@ export class SlackBuddy extends Think<Env> {
 				// from a broken agent — the owner reasonably read a correct,
 				// on-time, empty run as a failure. One line costs a glance and
 				// removes the doubt.
-				const quiet = await slack.sendMessage({
-					channelId: dm,
-					text: renderQuiet(ctx),
-				});
-				store.recordSent(quiet.ts);
+				await this.announce(renderQuiet(ctx), quietNotification(ctx));
 
 				// Per-stage counts, so "empty" says which stage produced nothing.
 				store.finishDigestRun(runId, "empty", 0, describeStats(result.stats));
 				if (advanceCursor) store.setCursor(LAST_DIGEST, Date.now().toString());
 				this.settleMissed(since);
-				await this.sendNotification(quietNotification(ctx), quiet.permalink);
 				return;
 			}
 
@@ -1041,7 +1056,8 @@ export class SlackBuddy extends Think<Env> {
 			if (suggestion) store.markFocusSuggested(suggestion.channelId, suggestion.name ?? "");
 			this.settleMissed(since);
 			store.finishDigestRun(runId, "ok", briefing.items.length, describeStats({ ...result.stats, surfaced: briefing.items.length }));
-			await this.sendNotification(briefingNotification(briefing, ctx), main.permalink);
+			// Lands just below the briefing, in the same DM, so it needs no link.
+			await this.sendNotification(briefingNotification(briefing, ctx));
 		} catch (error) {
 			this.noteIfRateLimited(error);
 			store.finishDigestRun(runId, "failed", 0, error instanceof Error ? error.message : String(error));

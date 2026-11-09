@@ -63,13 +63,16 @@ Two labelled test replies in the owner's DM, read back with `slack_read_thread`.
 
 ### Probed 2026-11-09, for notifications
 
-One labelled test notification through the owner's workflow, found again with a DM search.
+Labelled test messages through the owner's workflow and in its DM, read back through the
+gateway; the owner checked what only the Slack client shows.
 
-| Fact       | Detail                                                                                                                      |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Gateway    | No reminder tool among the 19, and the seven write tools all act as the owner, so nothing it sends can notify them.         |
-| Publishing | An unpublished workflow answers `400 {"ok":false,"error":"workflow_not_published"}`; once published, `200`.                 |
-| Delivery   | `{"message": "…"}` arrived as a DM from the workflow, a bot, not from the owner. A URL in the variable became a Slack link. |
+| Fact       | Detail                                                                                                                                                                                                                       |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Gateway    | No reminder tool among the 19, and the seven write tools all act as the owner, so nothing it sends can notify them.                                                                                                          |
+| Publishing | An unpublished workflow answers `400 {"ok":false,"error":"workflow_not_published"}`; once published, `200`.                                                                                                                  |
+| Delivery   | `{"message": "…"}` arrived as a DM from the workflow, a bot, not from the owner. A URL in the variable became a Slack link.                                                                                                  |
+| Variables  | Inserted as typed. `**bold**` stays literal, and neither `[label](url)` nor `<url\|label>` becomes a link; only a bare URL does.                                                                                             |
+| Its DM     | The gateway posts there as the owner, at the top level and in threads under the workflow's messages, and reads both. The workflow's messages carry its bot id, `B0CG6NCNEFK`. The owner can type there and reply in threads. |
 
 ## Shape
 
@@ -99,8 +102,9 @@ not `getScheduledTasks()`. The Think scheduling DSL is minute-granularity
 (`every <n> minutes`) and static, so it can express neither the 10 s burst nor an
 adaptive interval.
 
-One surface for everything: your self-DM, `D0BTQQF7WCW`. The briefing lands there and
-you reply there.
+One surface for everything: the DM of the workflow that notifies you, `D0CG8GT74Q4`;
+see "Notifications". The briefing lands there and you reply there. Until November it
+was your self-DM, `D0BTQQF7WCW`, which still works the same way without a workflow.
 
 ## Consequence: the agent speaks as you
 
@@ -127,6 +131,10 @@ timestamp than your second, and a cursor-only rule would skip it.
 Gateway-sent messages do carry a `*Sent using* <@U0B66544P62|Vibe>` suffix that messages
 typed in Slack lack, so it is a real in-band signal — but it is a rendered display
 string. The ledger stays authoritative; the marker is a cross-check.
+
+The notifying workflow posts into the same DM under its own bot id, and its messages
+must never be answered. Only the owner's messages count as input. One whose author
+cannot be read still counts, so a parsing change cannot silence the agent.
 
 **Delivery is not a model capability.** `slack_send_message` is never exposed as a tool.
 The app calls it directly through the MCP client with `channel_id` hardcoded to the
@@ -207,10 +215,11 @@ no notification is ever generated. Polling is the only option in this design.
 0. If a turn is already in flight, re-arm and return. The Durable Object is
    single-threaded and Think serializes turns, so an unguarded poll during a slow turn
    queues work rather than dropping it — the queue is what has to be avoided.
-1. `slack_read_channel(D0BTQQF7WCW, oldest=cursor)` — returns top-level messages and,
-   on each parent, `Thread: N replies (latest: <ts>)`
+1. `slack_read_channel(OWNER_DM_CHANNEL_ID, oldest=cursor)` — returns top-level messages
+   and, on each parent, `Thread: N replies (latest: <ts>)`
 2. For any thread whose `latest` has advanced past its stored cursor, `slack_read_thread`
-3. Across both surfaces, keep messages with `ts > cursor` and `ts ∉ sent_ledger`
+3. Across both surfaces, keep the owner's messages with `ts > cursor` and
+   `ts ∉ sent_ledger`
 4. If nothing remains, downshift cadence and return
 5. `slack_add_reaction("eyes")` — acknowledgment within one tick
 6. `runTurn({ mode: "wait", input, idempotencyKey: ts })`
@@ -220,6 +229,10 @@ no notification is ever generated. Polling is the only option in this design.
 
 Ordering in step 7 matters: if the process dies between sending and recording, the next
 poll sees an agent message that is not in the ledger and answers it. Record first.
+
+The cursor is kept per DM. The first read of a DM only records where it stands, its
+newest message and every thread's signature, and answers nothing, so moving to a new DM
+does not replay what was already there.
 
 The `white_check_mark` reaction is optional — the reply itself signals completion, and
 the extra call buys little. The `eyes` ack is the one that carries weight.
@@ -397,8 +410,8 @@ pure functions in `recovery.ts`:
 **The owner is told.** The scheduled task's handler owns its retries, because Think's
 retry runs immediately and tells the handler nothing about attempts. A run gets two
 quick attempts, the second on the fallback model if the first was rate limited. If both
-fail, one line goes to the DM: "Morning briefing · Mon 2 Nov didn't go out: the model
-call failed. I'll try again at 09:00." Retries follow at 30 minutes and 2 hours; only
+fail, the owner gets one line, through the workflow when there is one: "Morning
+briefing · Mon 2 Nov didn't go out: the model call failed. I'll try again at 09:00." Retries follow at 30 minutes and 2 hours; only
 the last failure is announced again, handing over to the next morning. Reasons are
 fixed phrases, never raw errors, which can carry tool output.
 
@@ -430,12 +443,23 @@ only a paid plan, though admins can restrict who may create webhook workflows. I
 the optional `SLACK_WORKFLOW_URL` secret; without it nothing is sent. The URL is a
 credential: anyone who has it can make the workflow DM the owner.
 
-| Event             | Notification, in plain text                                                                             |
-| ----------------- | ------------------------------------------------------------------------------------------------------- |
-| Briefing          | "Morning briefing · Mon 9 Nov: 5 items, 1 needs you." then the summary and a link to the briefing       |
-| Quiet day         | "Morning briefing · Mon 9 Nov: nothing worth surfacing." and a link                                     |
-| Failure notice    | the notice itself, and a link to it                                                                     |
-| Slack unreachable | "… didn't go out: Slack couldn't be reached. I'll catch up once it's back.", once per scheduled morning |
+The workflow inserts the variable as typed: Markdown shows as symbols, and only bare
+URLs become links. So the briefing does not go through it. The conversation lives in
+the workflow's DM instead: the agent posts the briefing there, as the owner and fully
+formatted, and the workflow's notification lands just below it. The owner replies in the
+briefing's thread, under a notification, or in a new message, and the agent answers in
+the thread as before.
+
+| Event             | Sent                                                                                                                           |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Briefing          | posted by the agent, then the workflow's "Morning briefing · Mon 9 Nov: 5 items, 1 needs you." and the summary                 |
+| Quiet day         | by the workflow alone: "Morning briefing · Mon 9 Nov: nothing worth surfacing." and what was read                              |
+| Failure notice    | by the workflow alone, in the notice's words                                                                                   |
+| Slack unreachable | by the workflow alone, once per scheduled morning: "… didn't go out: Slack couldn't be reached. I'll catch up once it's back." |
+
+One-liners go through the workflow alone, so the DM does not show each twice, once as
+the owner and once from the workflow. Without a workflow, or when it refuses, they are
+posted in the DM as before.
 
 Replies to the owner raise none. They answer something the owner just sent, so the
 owner is usually still watching, and a notification for each would double up during a
@@ -556,7 +580,7 @@ place rather than dropped.
 MISTRAL_API_KEY      secret   gateway auth and model auth
 SLACK_WORKFLOW_URL   secret   optional: the Slack workflow that notifies the owner
 OWNER_SLACK_USER_ID  var      U0BUM44636U
-OWNER_DM_CHANNEL_ID  var      D0BTQQF7WCW
+OWNER_DM_CHANNEL_ID  var      D0CG8GT74Q4, the workflow's DM (the self-DM, D0BTQQF7WCW, without one)
 ```
 
 Secrets go in `.env` for local development, which is also where `wrangler types` reads
@@ -710,8 +734,9 @@ see "When a briefing fails".
   minutes.
 - While Slack itself is unreachable no notice can be posted in the DM. The workflow
   notification says so, and the catch-up after Slack returns says what was missed.
-- Notifications arrive in the workflow's own DM, a tap away from the briefing, and
-  replies to the owner raise none.
+- Only the workflow's notifications come from someone else. Briefings and replies are
+  still posted as you, so replies to you raise no notification.
+- The self-DM is no longer read. Messages sent there go unanswered.
 
 ## Migration path to a bot app
 

@@ -276,8 +276,13 @@ describe("notifications", () => {
 		expect(briefingNotification(asks, ctx)).toMatch(/: 2 items, 2 need you\.$/);
 	});
 
-	it("announce a quiet day", () => {
-		expect(quietNotification(ctx)).toMatch(/^Morning briefing · Thu 17 Sept?: nothing worth surfacing\.$/);
+	it("carry the whole quiet-day message, since the workflow sends it alone", () => {
+		expect(quietNotification(ctx)).toMatch(
+			/^Morning briefing · Thu 17 Sept?: nothing worth surfacing\.\nRead 412 messages across 14 channels since Wed 14:30\.$/,
+		);
+		const note = "Catching up: briefings haven't gone out since Wed 08:30 (Slack couldn't be reached).";
+		expect(quietNotification({ ...ctx, note }).split("\n")[1]).toBe(note);
+		expect(quietNotification(ctx)).not.toMatch(/[*_]/);
 	});
 
 	it("repeat a failure notice without its Markdown, and say when Slack can't be reached at all", () => {
