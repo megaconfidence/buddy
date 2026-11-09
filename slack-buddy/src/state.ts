@@ -38,6 +38,8 @@ export const SLACK_RECONNECT_AT = "slack_reconnect_at";
 export const SLACK_RECONNECT_ATTEMPTS = "slack_reconnect_attempts";
 /** JSON `MissedBriefing`: a briefing that did not go out and still needs catching up. */
 export const MISSED_BRIEFING = "missed_briefing";
+/** `<ISO time> accepted|failed`: the last notification sent through the Slack workflow. */
+export const LAST_NOTIFICATION = "last_notification";
 
 /**
  * Opaque `Thread: N replies (latest: ...)` value, used only to detect change.

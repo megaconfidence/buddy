@@ -82,6 +82,11 @@ export function briefingTitle(now: Date, timeZone: string): string {
 	return hour < 12 ? "Morning briefing" : "Briefing";
 }
 
+/** `Morning briefing · Mon 9 Nov`: how a briefing message, and its notification, opens. */
+function heading(opts: { title: string; now: Date; timeZone: string }): string {
+	return `${opts.title} · ${formatDay(opts.now, opts.timeZone)}`;
+}
+
 const channelLabel = (s: BriefingSource) => (s.channelName ? `#${s.channelName.replace(/[^a-z0-9_-]/gi, "")}` : "thread");
 
 /** End a fragment as a sentence, so an italic note after it does not run on. */
@@ -148,7 +153,7 @@ function footer(briefing: Briefing, ctx: RenderContext): string {
 }
 
 export function renderBriefing(briefing: Briefing, ctx: RenderContext, maxLinks = LINKS_PER_ITEM): string {
-	const parts = [`**${ctx.title} · ${formatDay(ctx.now, ctx.timeZone)}**`];
+	const parts = [`**${heading(ctx)}**`];
 	if (ctx.note) parts.push(`_${ctx.note}_`);
 	if (briefing.tldr) parts.push(briefing.tldr);
 
@@ -215,26 +220,59 @@ export function renderQuiet(ctx: RenderContext): string {
 			? `No new messages in your channels since ${since}.`
 			: `Read ${plural(s.messages, "message")} across ${plural(s.channels, "channel")} since ${since}.`) + partial(s);
 	const note = ctx.note ? `\n_${ctx.note}_` : "";
-	return `**${ctx.title} · ${formatDay(ctx.now, ctx.timeZone)}** — nothing worth surfacing.${note}\n_${detail}_`;
+	return `**${heading(ctx)}** — nothing worth surfacing.${note}\n_${detail}_`;
+}
+
+/** A briefing that did not go out, as told to the owner. */
+export type FailureNotice = {
+	title: string;
+	now: Date;
+	timeZone: string;
+	reason: string;
+	/** When the next attempt runs; null once retries are used up. */
+	retryAt: Date | null;
+	repeated: boolean;
+	/** Slack can't be reached, so the catch-up waits for it rather than for a set time. */
+	awaitingSlack?: boolean;
+};
+
+function nextStep(notice: FailureNotice): string {
+	if (notice.awaitingSlack) return "I'll catch up once it's back.";
+	if (!notice.retryAt) return `Tomorrow's briefing will cover today too, or reply "briefing" to try now.`;
+	const at = new Intl.DateTimeFormat("en-GB", { timeZone: notice.timeZone, hour: "2-digit", minute: "2-digit", hour12: false }).format(
+		notice.retryAt,
+	);
+	return `I'll try again at ${at}.`;
+}
+
+function failureDetail(notice: FailureNotice): string {
+	return `${notice.repeated ? "still didn't" : "didn't"} go out: ${notice.reason}. ${nextStep(notice)}`;
 }
 
 /**
  * The notice for a briefing that did not go out. Silence is what hid the
  * October outage for eight weekdays; one short line costs nothing.
  */
-export function renderFailure(opts: {
-	title: string;
-	now: Date;
-	timeZone: string;
-	reason: string;
-	retryAt: Date | null;
-	repeated: boolean;
-}): string {
-	const head = `**${opts.title} · ${formatDay(opts.now, opts.timeZone)}** ${opts.repeated ? "still didn't" : "didn't"} go out: ${opts.reason}.`;
-	const next = opts.retryAt
-		? `I'll try again at ${new Intl.DateTimeFormat("en-GB", { timeZone: opts.timeZone, hour: "2-digit", minute: "2-digit", hour12: false }).format(opts.retryAt)}.`
-		: `Tomorrow's briefing will cover today too, or reply "briefing" to try now.`;
-	return `${head} ${next}`;
+export function renderFailure(notice: FailureNotice): string {
+	return `**${heading(notice)}** ${failureDetail(notice)}`;
+}
+
+// Notifications are plain text: they are read in a phone's notification, and
+// the workflow that sends them inserts them into a message of its own.
+
+/** Says whether anything needs the owner before the summary. */
+export function briefingNotification(briefing: Briefing, ctx: RenderContext): string {
+	const asks = briefing.items.filter((i) => i.section === "needs_you").length;
+	const counts = plural(briefing.items.length, "item") + (asks > 0 ? `, ${asks} ${asks === 1 ? "needs" : "need"} you` : "");
+	return `${heading(ctx)}: ${counts}.${briefing.tldr ? ` ${briefing.tldr}` : ""}`;
+}
+
+export function quietNotification(ctx: RenderContext): string {
+	return `${heading(ctx)}: nothing worth surfacing.`;
+}
+
+export function failureNotification(notice: FailureNotice): string {
+	return `${heading(notice)} ${failureDetail(notice)}`;
 }
 
 /** The closing tip suggesting a focus channel. */

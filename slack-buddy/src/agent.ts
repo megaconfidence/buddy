@@ -6,9 +6,22 @@ import { z } from "zod";
 import { choosePollSchedule, nextPollDelaySeconds, pollReadOldest, type PendingSchedule } from "./cadence";
 import { runDigest } from "./digest";
 import { MAX_FOCUS_CHANNELS } from "./digest/collect";
-import { briefingTitle, catchUpNote, describeStats, fitBriefing, focusTip, renderFailure, renderQuiet } from "./digest/render";
+import {
+	briefingNotification,
+	briefingTitle,
+	catchUpNote,
+	describeStats,
+	failureNotification,
+	fitBriefing,
+	focusTip,
+	quietNotification,
+	renderFailure,
+	renderQuiet,
+	type FailureNotice,
+} from "./digest/render";
 import type { Briefing, Section } from "./digest/types";
 import { applyVerdict, suggestFocusChannel, tallyChannels, termDirection, type ChannelTally } from "./feedback";
+import { notifyOwner } from "./notify";
 import {
 	describeFailure,
 	isConnectionStuck,
@@ -26,6 +39,7 @@ import {
 	LAST_BRIEFING_TS,
 	LAST_DIGEST,
 	LAST_MANUAL_BRIEFING,
+	LAST_NOTIFICATION,
 	MISSED_BRIEFING,
 	MODEL_FALLBACK_UNTIL,
 	RATE_LIMITED_UNTIL,
@@ -122,6 +136,14 @@ export class SlackBuddy extends Think<Env> {
 
 	get slack(): SlackClient {
 		return new SlackClient(this.mcp as unknown as McpCaller);
+	}
+
+	/**
+	 * The Slack workflow that notifies the owner. Optional, so read loosely:
+	 * the generated `Env` only lists it when `.env` sets it.
+	 */
+	private get workflowUrl(): string | undefined {
+		return (this.env as Env & { SLACK_WORKFLOW_URL?: string }).SLACK_WORKFLOW_URL;
 	}
 
 	// ------------------------------------------------------------ lifecycle
@@ -546,6 +568,10 @@ export class SlackBuddy extends Think<Env> {
 				missedBriefing: this.readMissed(),
 				pendingRetries: schedules.filter((s) => s.callback === "retryBriefing").map((s) => s.time),
 			},
+			notifications: {
+				configured: Boolean(this.workflowUrl),
+				last: this.store.getCursor(LAST_NOTIFICATION),
+			},
 			recentRuns: this.store.recentRuns(3),
 		};
 	}
@@ -820,9 +846,18 @@ export class SlackBuddy extends Think<Env> {
 
 		try {
 			if (!(await this.healSlack(true))) {
-				// Nothing can be posted, not even a notice. The poller keeps
+				// Nothing can be posted, not even a notice, but the workflow does
+				// not go through the gateway and can still say so. The poller keeps
 				// repairing the connection and runs the catch-up once it is back.
-				this.writeMissed(recordMissed(missed, { since, at: Date.now(), reason: "Slack couldn't be reached" }));
+				const reason = "Slack couldn't be reached";
+				this.writeMissed(recordMissed(missed, { since, at: Date.now(), reason }));
+				if (!catchUp) {
+					const now = new Date();
+					const timeZone = this.env.OWNER_TIMEZONE;
+					const title = briefingTitle(now, timeZone);
+					const notice = { title, now, timeZone, reason, retryAt: null, repeated: missed !== null, awaitingSlack: true };
+					await this.sendNotification(failureNotification(notice), null);
+				}
 				return;
 			}
 			await this.retry(() => this.runDailyDigest(runId, since, true, { note }), {
@@ -849,6 +884,8 @@ export class SlackBuddy extends Think<Env> {
 	 * announced and retried like the first.
 	 */
 	private async onBriefingFailed(since: number, error: unknown, scheduled: boolean): Promise<void> {
+		let notice: FailureNotice | null = null;
+		let link: string | null = null;
 		try {
 			const { reason } = describeFailure(error);
 			const missed = recordMissed(this.readMissed(), { since, at: Date.now(), reason });
@@ -865,23 +902,27 @@ export class SlackBuddy extends Think<Env> {
 
 			const now = new Date();
 			const timeZone = this.env.OWNER_TIMEZONE;
+			notice = {
+				title: briefingTitle(now, timeZone),
+				now,
+				timeZone,
+				reason,
+				retryAt: delay !== null ? new Date(now.getTime() + delay * 1000) : null,
+				repeated: !first,
+			};
 			const sent = await this.slack.sendMessage({
 				channelId: this.env.OWNER_DM_CHANNEL_ID,
-				text: renderFailure({
-					title: briefingTitle(now, timeZone),
-					now,
-					timeZone,
-					reason,
-					retryAt: delay !== null ? new Date(now.getTime() + delay * 1000) : null,
-					repeated: !first,
-				}),
+				text: renderFailure(notice),
 			});
 			this.store.recordSent(sent.ts);
 			this.writeMissed({ ...missed, notified: true });
+			link = sent.permalink;
 		} catch (notifyError) {
 			// Usually Slack itself failing: the catch-up says what was missed.
 			console.error("Could not report the failed briefing", notifyError);
 		}
+		// Sent even when the notice could not be posted: the workflow does not go through the gateway.
+		if (notice) await this.sendNotification(failureNotification(notice), link);
 	}
 
 	/**
@@ -898,6 +939,18 @@ export class SlackBuddy extends Think<Env> {
 			exclude,
 			full: focus.length >= MAX_FOCUS_CHANNELS,
 		});
+	}
+
+	/**
+	 * Notify the owner through the Slack workflow, when one is configured.
+	 * Everything the agent posts is posted as the owner, so Slack raises no
+	 * notification of its own. Never throws.
+	 */
+	private async sendNotification(text: string, link: string | null): Promise<void> {
+		const url = this.workflowUrl;
+		if (!url) return;
+		const accepted = await notifyOwner(url, text, link);
+		this.store.setCursor(LAST_NOTIFICATION, `${new Date().toISOString()} ${accepted ? "accepted" : "failed"}`);
 	}
 
 	/** A delivered briefing that covers a missed one's window settles it. */
@@ -961,6 +1014,7 @@ export class SlackBuddy extends Think<Env> {
 				store.finishDigestRun(runId, "empty", 0, describeStats(result.stats));
 				if (advanceCursor) store.setCursor(LAST_DIGEST, Date.now().toString());
 				this.settleMissed(since);
+				await this.sendNotification(quietNotification(ctx), quiet.permalink);
 				return;
 			}
 
@@ -987,6 +1041,7 @@ export class SlackBuddy extends Think<Env> {
 			if (suggestion) store.markFocusSuggested(suggestion.channelId, suggestion.name ?? "");
 			this.settleMissed(since);
 			store.finishDigestRun(runId, "ok", briefing.items.length, describeStats({ ...result.stats, surfaced: briefing.items.length }));
+			await this.sendNotification(briefingNotification(briefing, ctx), main.permalink);
 		} catch (error) {
 			this.noteIfRateLimited(error);
 			store.finishDigestRun(runId, "failed", 0, error instanceof Error ? error.message : String(error));

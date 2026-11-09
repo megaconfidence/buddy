@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import { MAX_ITEMS } from "../src/digest/editorial";
 import {
 	MESSAGE_BUDGET,
+	briefingNotification,
 	briefingTitle,
 	catchUpNote,
+	failureNotification,
 	fitBriefing,
 	focusTip,
+	quietNotification,
 	renderBriefing,
 	renderFailure,
 	renderQuiet,
@@ -256,6 +259,40 @@ describe("notes, tips and partial coverage", () => {
 		expect(renderBriefing(typical, { ...ctx, stats })).toContain("3 of 18 searches failed, so coverage is partial.");
 		expect(renderQuiet({ ...ctx, stats })).toContain("3 of 18 searches failed, so coverage is partial.");
 		expect(renderBriefing(typical, ctx)).not.toContain("coverage is partial");
+	});
+});
+
+describe("notifications", () => {
+	it("say whether anything needs the owner, then give the summary, in plain text", () => {
+		expect(briefingNotification(typical, ctx)).toMatch(
+			/^Morning briefing · Thu 17 Sept?: 5 items, 1 needs you\. Vibe 2\.0 GA moved to 19 Nov and the team wants a launch demo\.$/,
+		);
+	});
+
+	it("count asks only when there are some", () => {
+		const news: Briefing = { tldr: "News.", items: [item(1, "whats_new", "A"), item(2, "whats_new", "B")] };
+		expect(briefingNotification(news, ctx)).toMatch(/: 2 items\. News\.$/);
+		const asks: Briefing = { tldr: "", items: [item(1, "needs_you", "A"), item(2, "needs_you", "B")] };
+		expect(briefingNotification(asks, ctx)).toMatch(/: 2 items, 2 need you\.$/);
+	});
+
+	it("announce a quiet day", () => {
+		expect(quietNotification(ctx)).toMatch(/^Morning briefing · Thu 17 Sept?: nothing worth surfacing\.$/);
+	});
+
+	it("repeat a failure notice without its Markdown, and say when Slack can't be reached at all", () => {
+		const notice = {
+			title: "Morning briefing",
+			now: NOW,
+			timeZone: TZ,
+			reason: "the model call failed",
+			retryAt: new Date(NOW.getTime() + 30 * 60_000),
+			repeated: false,
+		};
+		expect(failureNotification(notice)).toBe(renderFailure(notice).replaceAll("**", ""));
+
+		const unreachable = { ...notice, reason: "Slack couldn't be reached", retryAt: null, awaitingSlack: true };
+		expect(failureNotification(unreachable)).toMatch(/ didn't go out: Slack couldn't be reached\. I'll catch up once it's back\.$/);
 	});
 });
 

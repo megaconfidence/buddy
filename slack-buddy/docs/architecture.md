@@ -61,6 +61,16 @@ Two labelled test replies in the owner's DM, read back with `slack_read_thread`.
 | List numbers | An ordered list keeps its start number, so `3.` stays 3, but only after a blank line. Directly under a paragraph line it stays plain text, as CommonMark requires. |
 | Line breaks  | Single newlines inside a paragraph stay line breaks, and blank lines between paragraphs are kept.                                                                  |
 
+### Probed 2026-11-09, for notifications
+
+One labelled test notification through the owner's workflow, found again with a DM search.
+
+| Fact       | Detail                                                                                                                      |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Gateway    | No reminder tool among the 19, and the seven write tools all act as the owner, so nothing it sends can notify them.         |
+| Publishing | An unpublished workflow answers `400 {"ok":false,"error":"workflow_not_published"}`; once published, `200`.                 |
+| Delivery   | `{"message": "…"}` arrived as a DM from the workflow, a bot, not from the owner. A URL in the variable became a Slack link. |
+
 ## Shape
 
 ```
@@ -403,8 +413,41 @@ and the scheduled briefing forces one repair before deciding it cannot run.
 until a later briefing covers it. When Slack comes back, or a retry succeeds, the
 catch-up covers everything since the last briefing that went out, under a line saying
 so: "Catching up: briefings haven't gone out since 21 Oct 08:30 (Slack couldn't be
-reached)." While Slack itself is down nothing can be posted, not even the notice; the
-catch-up is how the owner finds out.
+reached)." While Slack itself is down nothing can be posted, not even the notice. The
+workflow notification still goes out, since it does not go through the gateway; see
+"Notifications".
+
+### Notifications
+
+The agent posts as the owner, and Slack never notifies anyone about their own messages,
+so briefings arrived silently, without even an unread badge. The gateway cannot change
+that: its seven write tools all act as the owner, and it has no reminder tool.
+
+A Workflow Builder workflow can. It starts from a webhook and sends its one text
+variable, `message`, to the owner as a DM. That DM comes from the workflow, not the
+owner, so Slack notifies as for any DM, on desktop and phone. It needs no Slack app,
+only a paid plan, though admins can restrict who may create webhook workflows. Its URL is
+the optional `SLACK_WORKFLOW_URL` secret; without it nothing is sent. The URL is a
+credential: anyone who has it can make the workflow DM the owner.
+
+| Event             | Notification, in plain text                                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------------------- |
+| Briefing          | "Morning briefing · Mon 9 Nov: 5 items, 1 needs you." then the summary and a link to the briefing       |
+| Quiet day         | "Morning briefing · Mon 9 Nov: nothing worth surfacing." and a link                                     |
+| Failure notice    | the notice itself, and a link to it                                                                     |
+| Slack unreachable | "… didn't go out: Slack couldn't be reached. I'll catch up once it's back.", once per scheduled morning |
+
+Replies to the owner raise none. They answer something the owner just sent, so the
+owner is usually still watching, and a notification for each would double up during a
+conversation.
+
+The webhook does not go through the gateway, so it still works when the gateway does
+not. In October it would have announced the outage on its first morning, not eight
+weekdays later.
+
+Sending is best effort. The call times out after 10 seconds and never throws, and it
+runs after the briefing is recorded, so a failed notification can neither fail nor
+repeat a briefing. A refusal is logged without the URL.
 
 ## What it decides to watch
 
@@ -510,10 +553,15 @@ place rather than dropped.
 ## Configuration
 
 ```
-MISTRAL_API_KEY      secret   gateway auth and model auth — the only credential
+MISTRAL_API_KEY      secret   gateway auth and model auth
+SLACK_WORKFLOW_URL   secret   optional: the Slack workflow that notifies the owner
 OWNER_SLACK_USER_ID  var      U0BUM44636U
 OWNER_DM_CHANNEL_ID  var      D0BTQQF7WCW
 ```
+
+Secrets go in `.env` for local development, which is also where `wrangler types` reads
+them from, and are set in production with `wrangler secret put`. The agent reads
+`SLACK_WORKFLOW_URL` loosely, so a checkout without it still typechecks.
 
 Bindings: one Durable Object (`SlackBuddy`, SQLite migration). No Workflow binding and
 no AI binding — the sweep runs in-agent and the model is reached over the Mistral API.
@@ -574,7 +622,9 @@ search, or an editor that rejected everything.
 
 `/health` also lists the focus channels, the learned workspace host, the item count of
 the latest briefing, and under `recovery` when Slack went down, how many reconnects
-have been tried, the missed briefing if any, and pending retries.
+have been tried, the missed briefing if any, and pending retries. Under
+`notifications` it shows whether a workflow is configured, and when the last
+notification was sent and whether Slack accepted it.
 
 These endpoints are unauthenticated. They only touch the owner's own DM and cannot leak
 data, but anyone who learns the URL can trigger a poll or a sweep. Add a shared secret
@@ -658,8 +708,10 @@ see "When a briefing fails".
 - Staying under Slack's search limit costs time: a run needing more than 10 searches
   waits for the minute to roll over, so a busy day's search phase takes one to two
   minutes.
-- While Slack itself is unreachable no notice can be posted; the catch-up after it
-  returns is how the owner learns what was missed.
+- While Slack itself is unreachable no notice can be posted in the DM. The workflow
+  notification says so, and the catch-up after Slack returns says what was missed.
+- Notifications arrive in the workflow's own DM, a tap away from the briefing, and
+  replies to the owner raise none.
 
 ## Migration path to a bot app
 
